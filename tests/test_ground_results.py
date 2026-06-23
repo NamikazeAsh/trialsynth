@@ -1,7 +1,5 @@
 """
 Unit tests for trialsynth.base.extract.ground_results.
-
-All tests use real local Gilda. No mocks are used.
 """
 
 from trialsynth.base.extract.ground_results import (
