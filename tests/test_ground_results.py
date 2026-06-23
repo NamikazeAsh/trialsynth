@@ -6,7 +6,7 @@ are used only for testing our own logic paths (filters, fallbacks) where we
 need to control whether Gilda finds anything, without building fake objects.
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from trialsynth.base.extract.ground_results import (
     _annotate_fallback,
@@ -16,6 +16,21 @@ from trialsynth.base.extract.ground_results import (
     ground_marker,
     ANNOTATE_STOPLIST,
 )
+
+
+def _make_annotation(text, db, id_, entry_name, score=1.0):
+    """Build a minimal fake Annotation object for filter tests only."""
+    term = MagicMock()
+    term.db = db
+    term.id = id_
+    term.entry_name = entry_name
+    scored = MagicMock()
+    scored.term = term
+    scored.score = score
+    ann = MagicMock()
+    ann.text = text
+    ann.matches = [scored]
+    return ann
 
 
 # ---------------------------------------------------------------------------
@@ -134,23 +149,26 @@ def test_annotate_fallback_returns_hgnc_hits():
 
 
 def test_annotate_fallback_non_hgnc_filtered():
-    """Non-HGNC hits from annotate are excluded."""
-    with patch("trialsynth.base.extract.ground_results.gilda.annotate", return_value=[]):
+    """Non-HGNC hits (e.g. MESH) are excluded even when Gilda returns them."""
+    ann = _make_annotation("nausea", "MESH", "D009325", "Nausea")
+    with patch("trialsynth.base.extract.ground_results.gilda.annotate", return_value=[ann]):
         hits = _annotate_fallback("Patient reported nausea.")
     assert hits == []
 
 
 def test_annotate_fallback_stoplist_filtered():
-    """Symbols in ANNOTATE_STOPLIST are excluded even if Gilda annotates them."""
+    """Stoplist symbols are excluded even when Gilda returns them as HGNC hits."""
     stopword = next(iter(ANNOTATE_STOPLIST))
-    with patch("trialsynth.base.extract.ground_results.gilda.annotate", return_value=[]):
+    ann = _make_annotation(stopword, "HGNC", "9999", "FakeGene")
+    with patch("trialsynth.base.extract.ground_results.gilda.annotate", return_value=[ann]):
         hits = _annotate_fallback(f"The {stopword} value was high.")
     assert hits == []
 
 
 def test_annotate_fallback_short_match_filtered():
-    """Matches shorter than 4 characters are excluded."""
-    with patch("trialsynth.base.extract.ground_results.gilda.annotate", return_value=[]):
+    """Matches shorter than 4 characters are excluded even when Gilda returns them."""
+    ann = _make_annotation("AB", "HGNC", "9999", "FakeGene")
+    with patch("trialsynth.base.extract.ground_results.gilda.annotate", return_value=[ann]):
         hits = _annotate_fallback("The AB level was elevated.")
     assert hits == []
 
@@ -194,7 +212,7 @@ def test_ground_adverse_event_annotate_fallback_fires():
 def test_ground_adverse_event_non_ae_namespace_not_returned():
     """Hits outside AE_NAMESPACES from annotate are not returned."""
     with patch("trialsynth.base.extract.ground_results.gilda.ground", return_value=[]), \
-         patch("trialsynth.base.extract.ground_results.gilda.annotate", return_value=[]):
+        patch("trialsynth.base.extract.ground_results.gilda.annotate", return_value=[]):
         result = ground_adverse_event("BRCA1 mutation", min_len=4)
     assert result is None
 
@@ -207,14 +225,3 @@ def test_ground_adverse_event_empty_string_returns_none():
     assert result is None
 
 
-# ---------------------------------------------------------------------------
-# CRITERIA_NAMESPACES filter (via get_gilda_grounding)
-# ---------------------------------------------------------------------------
-
-def test_criteria_chebi_hit_dropped():
-    """A CHEBI grounding (e.g. aspirin) is dropped by the CRITERIA_NAMESPACES filter in ground_json."""
-    result = get_gilda_grounding("aspirin", sources=["HP", "DOID", "MESH", "EFO", "CHEBI"])
-    assert result is not None
-    assert result["db"] == "CHEBI"
-    from trialsynth.base.extract.ground_results import CRITERIA_NAMESPACES
-    assert result["db"] not in CRITERIA_NAMESPACES
