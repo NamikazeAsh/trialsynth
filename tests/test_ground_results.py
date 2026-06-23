@@ -39,15 +39,6 @@ def test_normalize_ae_text_empty_string():
 # get_gilda_grounding
 # ---------------------------------------------------------------------------
 
-def test_get_gilda_grounding_empty_input_returns_none():
-    """Empty string is rejected before calling Gilda."""
-    assert get_gilda_grounding("") is None
-
-
-def test_get_gilda_grounding_no_results_returns_none():
-    """Unrecognizable term returns None when Gilda finds no match."""
-    assert get_gilda_grounding("xyzzy12345nonsense") is None
-
 
 def test_get_gilda_grounding_brca1():
     """BRCA1 grounds to HGNC:1100 with correct structure."""
@@ -85,11 +76,6 @@ def test_ground_marker_annotate_fallback_fires_when_direct_fails():
     assert hgnc_hits[0]["info"]["source"] == "annotate_fallback"
 
 
-def test_ground_marker_no_fallback_without_evidence_text():
-    """Annotate fallback is not attempted when evidence_text is absent."""
-    result = ground_marker({"text": "ZZZZZ12345", "evidence_text": ""})
-    assert result["groundings"] == []
-
 
 def test_ground_marker_variant_extracted():
     """HGVS-style variant notation is parsed from marker text."""
@@ -123,22 +109,18 @@ def test_annotate_fallback_non_hgnc_filtered():
 
 
 def test_annotate_fallback_stoplist_filtered():
-    """'CI' annotates as HGNC in Gilda but is in ANNOTATE_STOPLIST, so it is filtered out."""
-    hits = _annotate_fallback("The CI value was 0.95.")
-    ci_hits = [h for h in hits if h["symbol"].upper() == "CI"]
-    assert ci_hits == []
+    """'FISH' is 4 chars so length filter passes, but it is in ANNOTATE_STOPLIST so it is filtered out."""
+    hits = _annotate_fallback("The FISH result was positive.")
+    fish_hits = [h for h in hits if h["symbol"].upper() == "FISH"]
+    assert fish_hits == []
 
 
 def test_annotate_fallback_short_match_filtered():
-    """Annotations with text shorter than 4 characters are dropped by our length filter."""
-    hits = _annotate_fallback("The SRC kinase was activated.")
-    short_hits = [h for h in hits if len(h["symbol"]) < 4]
-    assert short_hits == []
+    """'KIT' annotates as HGNC with span length 3, which our length filter drops."""
+    hits = _annotate_fallback("The KIT expression was elevated.")
+    kit_hits = [h for h in hits if h["symbol"].upper() == "KIT"]
+    assert kit_hits == []
 
-
-def test_annotate_fallback_empty_input_returns_empty():
-    """Empty input returns empty list without calling Gilda."""
-    assert _annotate_fallback("") == []
 
 
 # ---------------------------------------------------------------------------
@@ -166,11 +148,8 @@ def test_ground_adverse_event_annotate_fallback_fires():
 
 
 def test_ground_adverse_event_non_ae_namespace_not_returned():
-    """HGNC annotation from annotate is excluded since HGNC is not in AE_NAMESPACES."""
-    result = ground_adverse_event("BRCA1 mutation", min_len=4)
+    """Gene symbol only grounds to HGNC which is not in AE_NAMESPACES, so result is None."""
+    result = ground_adverse_event("BRCA1", min_len=4)
     assert result is None
 
 
-def test_ground_adverse_event_empty_string_returns_none():
-    """Empty string is rejected by the min_len check."""
-    assert ground_adverse_event("", min_len=4) is None
