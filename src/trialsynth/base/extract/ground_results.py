@@ -2,7 +2,8 @@
 Ground genetic markers and clinical criteria in extracted JSON files using local Gilda.
 
 Reads raw anchor JSONs and writes grounded versions with HGNC groundings for
-genetic markers and HP/DOID/MESH/EFO groundings for inclusion/exclusion criteria and adverse events.
+genetic markers, HP/DOID/MESH/EFO groundings for inclusion/exclusion criteria, and
+HP/DOID/MESH/EFO/OAE groundings for adverse events.
 
 Usage:
     python ground_results.py --input-dir <raw_dir> --output-dir <grounded_dir>
@@ -15,32 +16,78 @@ import logging
 import random
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from xml.etree import ElementTree as ET
 
 import gilda
+from gilda.process import normalize as _gilda_normalize
+from gilda.term import Term
 
-from trialsynth.base.extract.paths import RESULTS_RAW_DIR, RESULTS_GROUNDED_DIR
+from trialsynth.base.extract.paths import RESULTS_RAW_DIR, RESULTS_GROUNDED_DIR, RESOURCES_DIR
 
 logger = logging.getLogger('trialsynth.base.extract.ground_results')
-AE_NAMESPACES = ["HP", "DOID", "MESH", "EFO"]
+AE_NAMESPACES = ["HP", "DOID", "MESH", "EFO", "OAE"]
 AE_SHORT_TOKEN_MIN_LEN_DEFAULT = 4
+
+_OAE_OWL_URL = "http://purl.obolibrary.org/obo/oae.owl"
+
+_OWL_NS = {
+    "owl": "http://www.w3.org/2002/07/owl#",
+    "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
+}
+
+
+def _oae_term(text: str, status: str, oae_id: str, entry_name: str) -> Term:
+    return Term(
+        norm_text=_gilda_normalize(text),
+        text=text,
+        db="OAE",
+        id=oae_id,
+        entry_name=entry_name,
+        status=status,
+        source="OAE",
+    )
+
+
+def _register_oae_terms():
+    """Parse oae.owl (downloading via pystow if not cached) and append OAE terms to the default Gilda grounder."""
+    oae_owl = RESOURCES_DIR.ensure(url=_OAE_OWL_URL, name="oae.owl")
+    root = ET.parse(oae_owl).getroot()
+    entries = gilda.get_grounder().entries
+    for cls in root.findall("owl:Class", _OWL_NS):
+        iri = cls.get("{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about", "")
+        m = re.search(r"OAE_(\d+)", iri)
+        if not m:
+            continue
+        oae_id = m.group(1)
+        label_el = cls.find("rdfs:label", _OWL_NS)
+        if label_el is None or not label_el.text:
+            continue
+        label = label_el.text.strip()
+        entry_name = re.sub(r"\s+ae$", "", label, flags=re.IGNORECASE).strip()
+        name_term = _oae_term(label, "name", oae_id, entry_name)
+        entries.setdefault(name_term.norm_text, []).append(name_term)
+        if label.lower().endswith(" ae"):
+            syn_term = _oae_term(entry_name, "synonym", oae_id, entry_name)
+            entries.setdefault(syn_term.norm_text, []).append(syn_term)
+
+
+_register_oae_terms()
+
 
 def get_gilda_grounding(text: str, sources: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
     """Ground text using local Gilda, returning the top hit or None."""
     if not text:
         return None
-    try:
-        results = gilda.ground(text, namespaces=sources)
-        if results:
-            top = results[0].term
-            return {
-                "entry_name": top.entry_name,
-                "db": top.db,
-                "id": top.id,
-                "score": results[0].score
-            }
-    except Exception:
-        pass
+    results = gilda.ground(text, namespaces=sources)
+    if results:
+        top = results[0].term
+        return {
+            "entry_name": top.entry_name,
+            "db": top.db,
+            "id": top.id,
+            "score": results[0].score
+        }
     return None
 
 
@@ -58,29 +105,25 @@ def _annotate_fallback(evidence_text: str) -> List[Dict[str, Any]]:
     """Fallback: run gilda.annotate() on full sentence, return HGNC hits above min length not in stoplist."""
     if not evidence_text:
         return []
-    try:
-        results = gilda.annotate(evidence_text)
-        hits = []
-        for r in results:
-            if not r.matches:
-                continue
-            top = r.matches[0]
-            if top.term.db != 'HGNC':
-                continue
-            if len(r.text) < 4:
-                continue
-            if r.text.upper() in ANNOTATE_STOPLIST or r.text in ANNOTATE_STOPLIST:
-                continue
-            hits.append({"symbol": r.text, "info": {
-                "entry_name": top.term.entry_name,
-                "db": top.term.db,
-                "id": top.term.id,
-                "score": top.score,
-                "source": "annotate_fallback"
-            }})
-        return hits
-    except Exception:
-        return []
+    hits = []
+    for r in gilda.annotate(evidence_text):
+        if not r.matches:
+            continue
+        top = r.matches[0]
+        if top.term.db != 'HGNC':
+            continue
+        if len(r.text) < 4:
+            continue
+        if r.text.upper() in ANNOTATE_STOPLIST or r.text in ANNOTATE_STOPLIST:
+            continue
+        hits.append({"symbol": r.text, "info": {
+            "entry_name": top.term.entry_name,
+            "db": top.term.db,
+            "id": top.term.id,
+            "score": top.score,
+            "source": "annotate_fallback"
+        }})
+    return hits
 
 
 def ground_marker(item: Any) -> Dict[str, Any]:
@@ -89,8 +132,8 @@ def ground_marker(item: Any) -> Dict[str, Any]:
         text = item
         evidence_text = ""
     else:
-        text = item.get("text", "")
-        evidence_text = item.get("evidence_text", "")
+        text = item.get("text") or ""
+        evidence_text = item.get("evidence_text") or ""
 
     raw = text.strip()
     parts = re.split(r'[:/-]', raw)
@@ -131,25 +174,21 @@ def _annotate_fallback_ae(text: str) -> Optional[Dict[str, Any]]:
     """Fallback: run gilda.annotate() on AE text, return top hit filtered to AE_NAMESPACES."""
     if not text:
         return None
-    try:
-        results = gilda.annotate(text)
-        for r in results:
-            if not r.matches:
-                continue
-            top = r.matches[0]
-            if top.term.db not in AE_NAMESPACES:
-                continue
-            if len(r.text) < 4:
-                continue
-            return {
-                "db": top.term.db,
-                "id": top.term.id,
-                "name": top.term.entry_name,
-                "score": top.score,
-                "source": "annotate",
-            }
-    except Exception:
-        pass
+    for r in gilda.annotate(text):
+        if not r.matches:
+            continue
+        top = r.matches[0]
+        if top.term.db not in AE_NAMESPACES:
+            continue
+        if len(r.text) < 4:
+            continue
+        return {
+            "db": top.term.db,
+            "id": top.term.id,
+            "name": top.term.entry_name,
+            "score": top.score,
+            "source": "annotate",
+        }
     return None
 
 
@@ -158,7 +197,7 @@ def ground_adverse_event(
     *,
     min_len: int,
 ) -> Optional[Dict[str, Any]]:
-    """Ground an AE event name via gilda.ground, falling back to gilda.annotate."""
+    """Ground an adverse event name with gilda.ground, falling back to gilda.annotate."""
     clean = _normalize_ae_text(event_name)
     if len(clean) < min_len:
         return None
@@ -179,7 +218,7 @@ def ground_json(
     output_path: Path,
     *,
     ae_min_len: int,
-) -> tuple[int, int, list[dict[str, Any]]]:
+) -> Tuple[int, int, List[Dict[str, Any]]]:
     """Ground all genetic markers, criteria, and AEs in a single JSON file and write output."""
     with open(input_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
@@ -193,7 +232,7 @@ def ground_json(
     grounded_genetic = []
     for item in data.get('genetic', {}).get('genetic_inclusion', []):
         grounded_genetic.append(ground_marker(item))
-    data['genetic']['grounded_inclusion'] = grounded_genetic
+    data.setdefault('genetic', {})['grounded_inclusion'] = grounded_genetic
 
     grounded_inclusion = []
     for item in data.get('inclusion_criteria', []):
@@ -224,7 +263,7 @@ def ground_json(
     data['grounded_exclusion_criteria'] = grounded_exclusion
     ae_total = 0
     ae_grounded = 0
-    ae_review_rows: list[dict[str, Any]] = []
+    ae_review_rows: List[Dict[str, Any]] = []
     for arm in data.get("arms", []):
         arm_name = arm.get("arm_name", "")
         for ae in arm.get("adverse_events", []):
@@ -283,13 +322,11 @@ def main():
     elif args.max_files and len(json_files) > args.max_files:
         random.seed(args.seed)
         json_files = random.sample(json_files, args.max_files)
-    elif args.max_files:
-        json_files = json_files[:args.max_files]
 
     logger.info(f"Grounding {len(json_files)} files...")
     ae_total = 0
     ae_grounded = 0
-    ae_rows: list[dict[str, Any]] = []
+    ae_rows: List[Dict[str, Any]] = []
     for i, jf in enumerate(json_files):
         out = args.output_dir / jf.name
         if out.exists():
