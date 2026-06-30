@@ -27,12 +27,31 @@ logger = logging.getLogger('trialsynth.base.extract.extract')
 LLM_MODEL = "gpt-5.4-mini"
 
 
+# Abbreviations whose trailing period must not be treated as a sentence
+# boundary, e.g. "nausea (57.1% vs. 8.6%)" should stay one sentence.
+_SENTENCE_ABBREVIATIONS = {
+    "vs", "e.g", "i.e", "etc", "al", "fig", "figs", "no", "nos",
+    "cf", "approx", "ca", "vol", "ref", "eq", "pp", "incl",
+}
+
+
+def _ends_with_abbreviation(sentence: str) -> bool:
+    match = re.search(r"([A-Za-z][A-Za-z.]*)\.$", sentence.rstrip())
+    return bool(match) and match.group(1).lower().rstrip(".") in _SENTENCE_ABBREVIATIONS
+
+
 def split_sentences(text: str) -> list[str]:
     blob = re.sub(r"\s+", " ", text.strip())
     if not blob:
         return []
     parts = re.split(r"(?<=[.!?])\s+", blob)
-    return [p.strip() for p in parts if p.strip()]
+    sentences: list[str] = []
+    for part in parts:
+        if sentences and _ends_with_abbreviation(sentences[-1]):
+            sentences[-1] = f"{sentences[-1]} {part}"
+        else:
+            sentences.append(part)
+    return [s.strip() for s in sentences if s.strip()]
 
 
 def normalize(text: str) -> str:
