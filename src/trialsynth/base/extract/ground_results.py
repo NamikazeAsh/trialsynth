@@ -53,8 +53,9 @@ def _register_oae_terms():
     """Parse oae.owl (downloading via pystow if not cached) and append OAE terms to the default Gilda grounder."""
     oae_owl = RESOURCES_DIR.ensure(url=_OAE_OWL_URL, name="oae.owl")
     root = ET.parse(oae_owl).getroot()
-    entries = gilda.get_grounder().entries
+    entries = gilda.get_grounder().entries  # the default grounder's term dict, keyed by normalized text
     for cls in root.findall("owl:Class", _OWL_NS):
+        # rdf:about holds the term IRI; ElementTree needs the full namespace, not the "rdf:" prefix
         iri = cls.get("{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about", "")
         m = re.search(r"OAE_(\d+)", iri)
         if not m:
@@ -67,6 +68,7 @@ def _register_oae_terms():
         entry_name = re.sub(r"\s+ae$", "", label, flags=re.IGNORECASE).strip()
         name_term = _oae_term(label, "name", oae_id, entry_name)
         entries.setdefault(name_term.norm_text, []).append(name_term)
+        # OAE labels end in " AE" (e.g. "diarrhea AE"); also register the stripped form so plain queries match
         if label.lower().endswith(" ae"):
             syn_term = _oae_term(entry_name, "synonym", oae_id, entry_name)
             entries.setdefault(syn_term.norm_text, []).append(syn_term)
