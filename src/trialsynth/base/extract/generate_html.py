@@ -250,6 +250,8 @@ def generate_study_html(study_id, data, is_first):
         badges = []
         for g_info in item.get('groundings', []):
             if not isinstance(g_info, dict) or 'info' not in g_info: continue
+            # Only HGNC genetic groundings, matching the CoGEx ingestion filter
+            if g_info['info'].get('db') != 'HGNC': continue
             gid = f"{g_info['info'].get('db')}:{g_info['info'].get('id')}"
             if gid not in unique_ids:
                 badges.append(format_grounding(g_info['info']))
