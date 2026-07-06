@@ -2,9 +2,13 @@
 Unit tests for trialsynth.base.extract.ground_results.
 """
 
+import gilda
+
 from trialsynth.base.extract.ground_results import (
     _annotate_fallback,
+    _get_grounder,
     _normalize_ae_text,
+    _oae_terms,
     get_gilda_grounding,
     ground_adverse_event,
     ground_marker,
@@ -151,5 +155,72 @@ def test_ground_adverse_event_non_ae_namespace_not_returned():
     """Gene symbol only grounds to HGNC which is not in AE_NAMESPACES, so result is None."""
     result = ground_adverse_event("BRCA1", min_len=4)
     assert result is None
+
+
+def test_ground_adverse_event_oae_gap_term_via_ground():
+    """OAE-only term with no default Gilda coverage grounds via the direct ground path."""
+    result = ground_adverse_event("serious adverse events", min_len=4)
+    assert result is not None
+    assert result["db"] == "OAE"
+    assert result["source"] == "ground"
+
+
+def test_ground_adverse_event_oae_gap_term_via_annotate():
+    """Longer phrase containing an OAE term only matches through the annotate fallback."""
+    result = ground_adverse_event("Adverse events (overall)", min_len=4)
+    assert result is not None
+    assert result["db"] == "OAE"
+    assert result["source"] == "annotate"
+
+
+def test_ground_adverse_event_mesh_term_not_hijacked_by_oae():
+    """A term with a good default Gilda match still resolves to MESH, not OAE."""
+    result = ground_adverse_event("nausea", min_len=4)
+    assert result is not None
+    assert result["db"] == "MESH"
+
+
+# ---------------------------------------------------------------------------
+# _get_grounder  (trialsynth-owned grounder: isolation and caching)
+# ---------------------------------------------------------------------------
+
+def test_get_grounder_does_not_mutate_global_gilda_grounder():
+    """Building the trialsynth grounder must not add OAE terms to Gilda's default grounder."""
+    _get_grounder()
+    assert gilda.ground("serious adverse event", namespaces=["OAE"]) == []
+
+
+def test_get_grounder_builds_once_and_reuses_instance():
+    """The trialsynth grounder is built once and the same instance is returned on reuse."""
+    first = _get_grounder()
+    second = _get_grounder()
+    assert first is second
+
+
+# ---------------------------------------------------------------------------
+# _oae_terms  (OAE OWL parsing)
+# ---------------------------------------------------------------------------
+
+def test_oae_terms_returns_non_empty_list():
+    """Parsing oae.owl produces at least one Term."""
+    terms = _oae_terms()
+    assert len(terms) > 0
+
+
+def test_oae_terms_tagged_with_oae_namespace():
+    """Every parsed term is tagged with db='OAE'."""
+    terms = _oae_terms()
+    assert all(term.db == "OAE" for term in terms)
+
+
+def test_oae_terms_strips_ae_suffix_into_synonym():
+    """A label ending in ' AE' produces both a name term and a stripped-suffix synonym term."""
+    terms = _oae_terms()
+    names = {term.text for term in terms if term.status == "name"}
+    synonyms = {term.text for term in terms if term.status == "synonym"}
+    ae_labels = [name for name in names if name.lower().endswith(" ae")]
+    assert ae_labels, "expected at least one OAE label ending in ' AE'"
+    stripped = ae_labels[0][: -len(" AE")]
+    assert stripped in synonyms
 
 
