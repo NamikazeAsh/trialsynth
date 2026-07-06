@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from xml.etree import ElementTree as ET
 
 import gilda
+import gilda.ner
+from gilda import make_grounder
 from gilda.process import normalize as _gilda_normalize
 from gilda.term import Term
 
@@ -49,11 +51,11 @@ def _oae_term(text: str, status: str, oae_id: str, entry_name: str) -> Term:
     )
 
 
-def _register_oae_terms():
-    """Parse oae.owl (downloading via pystow if not cached) and append OAE terms to the default Gilda grounder."""
+def _oae_terms() -> List[Term]:
+    """Parse oae.owl (downloading via pystow if not cached) into OAE Gilda Terms."""
     oae_owl = RESOURCES_DIR.ensure(url=_OAE_OWL_URL, name="oae.owl")
     root = ET.parse(oae_owl).getroot()
-    entries = gilda.get_grounder().entries  # the default grounder's term dict, keyed by normalized text
+    terms = []
     for cls in root.findall("owl:Class", _OWL_NS):
         # rdf:about holds the term IRI; ElementTree needs the full namespace, not the "rdf:" prefix
         iri = cls.get("{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about", "")
@@ -66,22 +68,32 @@ def _register_oae_terms():
             continue
         label = label_el.text.strip()
         entry_name = re.sub(r"\s+ae$", "", label, flags=re.IGNORECASE).strip()
-        name_term = _oae_term(label, "name", oae_id, entry_name)
-        entries.setdefault(name_term.norm_text, []).append(name_term)
+        terms.append(_oae_term(label, "name", oae_id, entry_name))
         # OAE labels end in " AE" (e.g. "diarrhea AE"); also register the stripped form so plain queries match
         if label.lower().endswith(" ae"):
-            syn_term = _oae_term(entry_name, "synonym", oae_id, entry_name)
-            entries.setdefault(syn_term.norm_text, []).append(syn_term)
+            terms.append(_oae_term(entry_name, "synonym", oae_id, entry_name))
+    return terms
 
 
-_register_oae_terms()
+_grounder = None
+
+
+def _get_grounder():
+    """Build once and return a trialsynth grounder: Gilda's default terms plus OAE terms."""
+    global _grounder
+    if _grounder is None:
+        entries = {norm: list(terms) for norm, terms in gilda.get_grounder().entries.items()}
+        for term in _oae_terms():
+            entries.setdefault(term.norm_text, []).append(term)
+        _grounder = make_grounder(entries)
+    return _grounder
 
 
 def get_gilda_grounding(text: str, sources: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
     """Ground text using local Gilda, returning the top hit or None."""
     if not text:
         return None
-    results = gilda.ground(text, namespaces=sources)
+    results = _get_grounder().ground(text, namespaces=sources)
     if results:
         top = results[0].term
         return {
@@ -104,11 +116,11 @@ ANNOTATE_STOPLIST = {
 
 
 def _annotate_fallback(evidence_text: str) -> List[Dict[str, Any]]:
-    """Fallback: run gilda.annotate() on full sentence, return HGNC hits above min length not in stoplist."""
+    """Fallback: annotate the full sentence with the trialsynth grounder, return HGNC hits above min length not in stoplist."""
     if not evidence_text:
         return []
     hits = []
-    for r in gilda.annotate(evidence_text):
+    for r in gilda.ner.annotate(evidence_text, grounder=_get_grounder()):
         if not r.matches:
             continue
         top = r.matches[0]
@@ -173,10 +185,10 @@ def _normalize_ae_text(text: str) -> str:
 
 
 def _annotate_fallback_ae(text: str) -> Optional[Dict[str, Any]]:
-    """Fallback: run gilda.annotate() on AE text, return top hit filtered to AE_NAMESPACES."""
+    """Fallback: annotate AE text with the trialsynth grounder, return top hit filtered to AE_NAMESPACES."""
     if not text:
         return None
-    for r in gilda.annotate(text):
+    for r in gilda.ner.annotate(text, grounder=_get_grounder(), namespaces=AE_NAMESPACES):
         if not r.matches:
             continue
         top = r.matches[0]
@@ -199,7 +211,7 @@ def ground_adverse_event(
     *,
     min_len: int,
 ) -> Optional[Dict[str, Any]]:
-    """Ground an adverse event name with gilda.ground, falling back to gilda.annotate."""
+    """Ground an adverse event name with the trialsynth grounder, falling back to annotate."""
     clean = _normalize_ae_text(event_name)
     if len(clean) < min_len:
         return None
