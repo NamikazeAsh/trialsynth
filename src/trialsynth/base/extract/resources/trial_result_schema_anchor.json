@@ -8,10 +8,14 @@
     "locations": {"type": "array", "items": {"type": "string"}},
     "arms": {
       "type": "array",
+      "description": "All distinct patient groups with dedicated outcome data reported in the study, whether an interventional treatment/control arm or an observational subgroup defined by a biomarker, exposure, or other stratifying factor. A group counts as an arm only if the paper reports its own patient count and its own metrics, not if it is only mentioned as the comparison point inside another group's result.",
       "items": {
         "type": "object",
         "properties": {
-          "arm_name": {"type": "string"},
+          "arm_name": {
+            "type": "string",
+            "description": "Name of the patient group or subgroup with its own dedicated outcome data, whether an interventional treatment/control arm or an observational subgroup defined by a biomarker, exposure, or other stratifying factor."
+          },
           "n": {"type": ["integer", "null"]},
           "dosage": {"type": ["string", "null"]},
           "evidence_anchor": {"type": "string"},
@@ -114,34 +118,34 @@
     },
     "genetic": {
       "type": "object",
+      "description": "Gene/protein biomarkers explicitly named in the source text.",
       "properties": {
-        "genetic_inclusion": {
+        "markers": {
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
-              "text": {"type": "string"},
-              "evidence_anchor": {"type": "string"}
+              "text": {
+                "type": "string",
+                "description": "HGNC symbol for the gene/protein explicitly named in the anchored sentence. Normalize paper aliases (e.g. p16→CDKN2A, HER2→ERBB2)."
+              },
+              "evidence_anchor": {
+                "type": "string",
+                "description": "Verbatim phrase naming this same biomarker (symbol, protein, or alias)."
+              },
+              "role": {
+                "type": "string",
+                "enum": ["inclusion", "exclusion", "other"],
+                "description": "inclusion: required for enrollment; exclusion: disqualifies enrollment; other: biomarker not stated as an entry criterion."
+              }
             },
-            "required": ["text", "evidence_anchor"],
-            "additionalProperties": false
-          }
-        },
-        "genetic_exclusion": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "text": {"type": "string"},
-              "evidence_anchor": {"type": "string"}
-            },
-            "required": ["text", "evidence_anchor"],
+            "required": ["text", "evidence_anchor", "role"],
             "additionalProperties": false
           }
         },
         "reasoning": {"type": "string"}
       },
-      "required": ["genetic_inclusion", "genetic_exclusion", "reasoning"],
+      "required": ["markers", "reasoning"],
       "additionalProperties": false
     }
   },
