@@ -103,10 +103,23 @@ def best_sentence_for_anchor(anchor: str, sentences: list[str]) -> str:
 
 
 def resolve_anchors(raw: dict, sentences: list[str]) -> dict:
-    """
-    Walk the raw LLM output and replace every evidence_anchor string with
-    the full containing sentence, using canonical field names
-    (source_sentence / evidence_text) expected by ground_results.py and generate_html.py.
+    """Replace every evidence_anchor with the full containing sentence.
+
+    Uses canonical field names (source_sentence / evidence_text) expected by
+    ground_results.py and generate_html.py. Genetic markers keep their ``role``
+    field; only ``evidence_anchor`` is replaced with ``evidence_text``.
+
+    Parameters
+    ----------
+    raw :
+        Parsed LLM extraction JSON.
+    sentences :
+        Source-text sentences used to resolve each evidence_anchor.
+
+    Returns
+    -------
+    :
+        The same dict, mutated in place.
     """
     for arm in raw.get("arms", []):
         anchor = arm.pop("evidence_anchor", "")
@@ -136,10 +149,7 @@ def resolve_anchors(raw: dict, sentences: list[str]) -> dict:
             m["source_sentence"] = best_sentence_for_anchor(a, sentences)
 
     genetic = raw.get("genetic", {})
-    for item in genetic.get("genetic_inclusion", []):
-        a = item.pop("evidence_anchor", "")
-        item["evidence_text"] = best_sentence_for_anchor(a, sentences)
-    for item in genetic.get("genetic_exclusion", []):
+    for item in genetic.get("markers", []):
         a = item.pop("evidence_anchor", "")
         item["evidence_text"] = best_sentence_for_anchor(a, sentences)
 

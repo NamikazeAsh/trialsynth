@@ -233,7 +233,27 @@ def ground_json(
     *,
     ae_min_len: int,
 ) -> Tuple[int, int, List[Dict[str, Any]]]:
-    """Ground all genetic markers, criteria, and AEs in a single JSON file and write output."""
+    """Ground all genetic markers, criteria, and AEs in a single JSON file and write output.
+
+    Genetic markers are read from ``genetic.markers``. Each grounded object keeps
+    its ``role`` (defaulting to ``"other"`` if missing). Inclusion-role markers
+    are also written to ``genetic.grounded_inclusion`` for CoGEx compatibility;
+    the full list is written to ``genetic.grounded_markers``.
+
+    Parameters
+    ----------
+    input_path :
+        Path to the resolved (anchor) JSON file.
+    output_path :
+        Path to write the grounded JSON file.
+    ae_min_len :
+        Minimum AE event-name length for grounding.
+
+    Returns
+    -------
+    :
+        AE total count, AE grounded count, and AE review rows.
+    """
     with open(input_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
@@ -243,10 +263,17 @@ def ground_json(
             for r in data["results"]
         ]
 
-    grounded_genetic = []
-    for item in data.get('genetic', {}).get('genetic_inclusion', []):
-        grounded_genetic.append(ground_marker(item))
-    data.setdefault('genetic', {})['grounded_inclusion'] = grounded_genetic
+    grounded_markers = []
+    for item in data.get('genetic', {}).get('markers', []):
+        grounded = ground_marker(item)
+        role = (item.get('role') if isinstance(item, dict) else None) or 'other'
+        grounded['role'] = role
+        grounded_markers.append(grounded)
+    genetic = data.setdefault('genetic', {})
+    genetic['grounded_markers'] = grounded_markers
+    genetic['grounded_inclusion'] = [
+        m for m in grounded_markers if m['role'] == 'inclusion'
+    ]
 
     grounded_inclusion = []
     for item in data.get('inclusion_criteria', []):
