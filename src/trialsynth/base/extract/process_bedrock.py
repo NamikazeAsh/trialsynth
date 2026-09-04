@@ -15,7 +15,7 @@ from pathlib import Path
 import click
 from tqdm import tqdm
 
-from trialsynth.base.extract.extract import resolve_anchors, split_sentences
+from trialsynth.base.extract.extract_util import resolve_anchors, split_sentences
 from trialsynth.base.extract.ground_results import (
     AE_SHORT_TOKEN_MIN_LEN_DEFAULT,
     ground_json,

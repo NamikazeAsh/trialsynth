@@ -6,7 +6,7 @@ import logging
 import re
 from difflib import SequenceMatcher
 
-logger = logging.getLogger('trialsynth.base.extract.extract')
+logger = logging.getLogger(__name__)
 
 
 # Abbreviations whose trailing period must not be treated as a sentence
