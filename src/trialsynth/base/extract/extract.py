@@ -1,30 +1,12 @@
 """
-Anchor phrase extractor for clinical trial result papers.
-
-Replaces the v1 schema (full text spans) with a two-stage approach:
-the LLM returns a short verbatim anchor phrase (5-15 words) per data point;
-post-processing resolves it to the full containing sentence via fuzzy match.
-
-Output is consumed by ground_results.py and generate_html.py.
+Functions for extracting and resolving evidence anchors to full sentences in
+clinical trial text.
 """
-
-import argparse
-import csv
-import json
 import logging
 import re
 from difflib import SequenceMatcher
-from pathlib import Path
-
-from openai import OpenAI
-
-from trialsynth.base.extract.resources import TRIAL_RESULT_SCHEMA_ANCHOR
-from trialsynth.base.extract.paths import CONTENT_TXT_DIR, RESULTS_RAW_DIR, \
-    RESULTS_GROUNDED_DIR, RESULTS_DIR
 
 logger = logging.getLogger('trialsynth.base.extract.extract')
-
-LLM_MODEL = "gpt-5.4-mini"
 
 
 # Abbreviations whose trailing period must not be treated as a sentence
@@ -154,124 +136,3 @@ def resolve_anchors(raw: dict, sentences: list[str]) -> dict:
         item["evidence_text"] = best_sentence_for_anchor(a, sentences)
 
     return raw
-
-
-def extract_trial_data(client: OpenAI, text: str, pmid: str) -> dict:
-    sentences = split_sentences(text)
-
-    response = client.chat.completions.create(
-        model=LLM_MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a clinical data scientist. Transform medical text into a queryable database structure. "
-                    "1. For EVERY single extracted data point (including Arm definitions, Dosages, Inclusion/Exclusion Criteria, "
-                    "Genetic Markers, Metrics, and Adverse Events), you MUST return a short verbatim anchor phrase "
-                    "(5 to 15 words maximum) copied directly from the source text that uniquely identifies the sentence "
-                    "containing the evidence. Use the field 'evidence_anchor' for this. "
-                    "Do NOT copy the full sentence — just a unique short phrase from it. "
-                    "This anchor is used programmatically to locate the full sentence, so it must be verbatim. "
-                    "2. Extract qualitative results and metrics. "
-                    "3. Assign safety events to arms. "
-                    "4. Embed structured metrics into Arms and Comparisons. When multiple subgroups "
-                    "exist for one outcome, isolate the subgroup name (e.g., 'Women <50') into the 'name' field "
-                    "and the clean numeric/CI result into 'value_text'. Do NOT repeat the baseline comparison. "
-                    "5. Isolate genetic biomarkers into the 'genetic' block using official HGNC Gene Symbols and HGVS nomenclature. "
-                    "Always use the official HGNC gene symbol in the text field (e.g. ERBB2 not HER2, MYC not cMYC, "
-                    "ABL1 not ABL, MS4A1 not CD20) so downstream grounding tools can resolve them correctly."
-                )
-            },
-            {"role": "user", "content": f"Text (PMID {pmid}): {text}"}
-        ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "clinical_trial_extraction_anchor",
-                "strict": True,
-                "schema": TRIAL_RESULT_SCHEMA_ANCHOR
-            }
-        }
-    )
-
-    raw = json.loads(response.choices[0].message.content)
-    resolved = resolve_anchors(raw, sentences)
-    return resolved, response.usage
-
-
-def process_pmid(pmid: str, client: OpenAI, content_dir: Path, output_dir: Path) -> dict:
-    out_file = output_dir / f"{pmid}.json"
-    if out_file.exists():
-        return {"pmid": pmid, "status": "skipped"}
-
-    txt_path = content_dir / f"{pmid}.txt"
-    if not txt_path.exists():
-        return {"pmid": pmid, "status": "missing_text"}
-
-    with open(txt_path, "r", encoding="utf-8") as f:
-        text = f.read()
-
-    try:
-        result, usage = extract_trial_data(client, text, pmid)
-        with open(out_file, "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2)
-        logger.info(f"  PMID {pmid} | input: {usage.prompt_tokens} | output: {usage.completion_tokens}")
-        return {
-            "pmid": pmid,
-            "status": "ok",
-            "input_tokens": usage.prompt_tokens,
-            "output_tokens": usage.completion_tokens,
-        }
-    except Exception as e:
-        logger.error(f"Failed {pmid}: {e}")
-        return {"pmid": pmid, "status": "error"}
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--pmids", nargs="+", default=None, help="Explicit PMID list to process")
-    parser.add_argument("--output-dir", default=None, help="Override output directory")
-    args = parser.parse_args()
-
-    output_dir = Path(args.output_dir) if args.output_dir else RESULTS_RAW_DIR.base
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    if args.pmids:
-        target_pmids = args.pmids
-    else:
-        grounded_dir = RESULTS_GROUNDED_DIR.base
-        target_pmids = [f.stem for f in sorted(grounded_dir.glob("*.json"))][:10]
-
-    logger.info(f"Running anchor extraction on {len(target_pmids)} PMIDs...")
-
-    client = OpenAI()
-    stats = []
-
-    content_dir = CONTENT_TXT_DIR.base
-    for pmid in target_pmids:
-        row = process_pmid(pmid, client, content_dir, output_dir)
-        stats.append(row)
-
-    completed = [r for r in stats if r["status"] == "ok"]
-    total_in = sum(r["input_tokens"] for r in completed)
-    total_out = sum(r["output_tokens"] for r in completed)
-    logger.info("=" * 60)
-    logger.info(f"{'PMID':<15} {'Input Tokens':>15} {'Output Tokens':>15}")
-    logger.info("-" * 60)
-    for r in completed:
-        logger.info(f"{r['pmid']:<15} {r['input_tokens']:>15} {r['output_tokens']:>15}")
-    logger.info("-" * 60)
-    logger.info(f"{'TOTAL':<15} {total_in:>15} {total_out:>15}")
-    logger.info(f"{'AVG/paper':<15} {total_in // max(1, len(completed)):>15} {total_out // max(1, len(completed)):>15}")
-    logger.info("=" * 60)
-
-    csv_path = RESULTS_DIR.join(name="token_comparison_anchor.csv")
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["pmid", "status", "input_tokens", "output_tokens"])
-        writer.writeheader()
-        writer.writerows(stats)
-    logger.info(f"CSV saved to: {csv_path}")
-
-
-if __name__ == "__main__":
-    main()
