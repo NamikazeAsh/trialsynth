@@ -217,38 +217,6 @@ def _download_one_text(pmid: str) -> None:
         tqdm.tqdm.write(f"{pmid} - FAILED: {e}")
 
 
-def download_texts_parallel(pmids: list[str], max_workers: int = 8):
-    """Download texts for PMIDs concurrently.
-
-    Same per-PMID behavior as :func:`download_texts`, using a thread pool.
-
-    Parameters
-    ----------
-    pmids :
-        List of PMIDs to download text for.
-    max_workers :
-        Maximum number of worker threads. Default: 8.
-    """
-    logger.info(
-        f"Downloading text for {len(pmids)} PMIDs with {max_workers} workers..."
-    )
-
-    pending = [
-        pmid for pmid in pmids
-        if not CONTENT_TXT_DIR.join(name=f"{pmid}.txt").exists()
-    ]
-    skipped = len(pmids) - len(pending)
-    if skipped:
-        logger.info(f"Skipping {skipped} PMIDs with existing text files")
-
-    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
-        futures = [
-            executor.submit(_download_one_text, pmid) for pmid in pending
-        ]
-        for fut in tqdm.tqdm(as_completed(futures), total=len(futures)):
-            fut.result()
-
-
 def _attempt_fulltext(pmid: str, pmcid: str, abstract) -> str:
     try:
         text = get_text_s3(pmcid)
