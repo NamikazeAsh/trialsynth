@@ -15,22 +15,17 @@ from trialsynth.ctgov.config import CTConfig
 from trialsynth.base.extract.paths import CONTENT_TXT_DIR
 
 
-logger = logging.getLogger('trialsynth.base.extract.orchestrate')
+logger = logging.getLogger(__name__)
 
 
-def get_intersection_pmids(limit: int = None) -> list[str]:
-    """Return PMIDs defined from the output of
-
-    Parameters
-    ----------
-    limit :
-        Optional limit on the number of PMIDs to return. If None, return all.
+def get_trial_pmids() -> list[str]:
+    """Return PMIDs linked to trials from either or both of ctgov or pubmed
 
     Returns
     -------
     :
-        List of PMIDs that are in both the registry result links and the PubMed
-        scan links.
+        List of PMIDs that are from either the registry result links and the
+        PubMed XML links.
     """
 
     ct_config = CTConfig()
@@ -43,16 +38,23 @@ def get_intersection_pmids(limit: int = None) -> list[str]:
     with gzip.open(ct_config.trial_publication_edges_path, "rt") as f:
         reader = csv.reader(f)
         _ = next(reader)
+        # Headers are:
+        # trial_id, pmid, rel_type, source, ref_type
         intersection = {
             row[1] for row in reader if row[1]
         }
 
-    return sorted(intersection)[:limit] if limit else sorted(intersection)
+    return sorted(intersection)
 
 
 def download_texts(pmids: list[str]):
-    # Download texts for PMIDs sequentially. Useful if the host environment has
-    # limited concurrency capabilities.
+    """Download texts for PMIDs sequentially
+
+    Parameters
+    ----------
+    pmids :
+        List of PMIDs to download text for.
+    """
     logger.info(f"Downloading text for {len(pmids)} PMIDs...")
 
     for pmid in tqdm.tqdm(pmids):
@@ -116,7 +118,7 @@ def download_texts_parallel(pmids: list[str], max_workers: int = 8):
             fut.result()
 
 
-def _overlay_fulltext_s3(pmid: str, pmcid: str, abstract) -> str:
+def _attempt_fulltext(pmid: str, pmcid: str, abstract) -> str:
     try:
         text = get_text_s3(pmcid)
         if text:
@@ -128,7 +130,6 @@ def _overlay_fulltext_s3(pmid: str, pmcid: str, abstract) -> str:
         tqdm.tqdm.write(f"{pmid} - S3 FAILED: {e}")
 
     if abstract:
-        # _write_pmid_text(pmid, abstract)
         CONTENT_TXT_DIR.join(name=f"{pmid}.txt").write_text(
             abstract, encoding="utf-8"
         )
@@ -139,22 +140,14 @@ def _overlay_fulltext_s3(pmid: str, pmcid: str, abstract) -> str:
 
 
 def download_texts_bulk(pmids: list[str], max_workers: int = 8):
-    """Download texts via a bulk PubMed metadata fetch plus optional S3 overlay.
-
-    Fetches PubMed XML in batches of 200 so abstracts and PMCIDs come back in
-    one pass. Abstracts are written immediately for PMIDs that have no PMCID.
-    PMIDs with a PMCID are then fetched from the PMC OA S3 bucket in parallel:
-    an S3 hit writes full text; a miss writes the abstract already returned by
-    the bulk fetch. PMIDs missing from the bulk response fall back to
-    per-PMID download.
+    """Download texts via a bulk PubMed metadata fetch and S3 PMC
 
     Parameters
     ----------
     pmids :
         List of PMIDs to download text for.
     max_workers :
-        Maximum number of worker threads for S3 full-text overlay and
-        per-PMID fallback. Default: 8.
+        Maximum number of worker threads for download. Default: 8.
     """
     logger.info(f"Bulk-downloading text for {len(pmids)} PMIDs...")
 
@@ -203,7 +196,7 @@ def download_texts_bulk(pmids: list[str], max_workers: int = 8):
     if s3_jobs:
         with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
             futures = [
-                executor.submit(_overlay_fulltext_s3, pmid, pmcid, abstract)
+                executor.submit(_attempt_fulltext, pmid, pmcid, abstract)
                 for pmid, pmcid, abstract in s3_jobs
             ]
             for fut in tqdm.tqdm(
