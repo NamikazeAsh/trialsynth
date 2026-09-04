@@ -18,11 +18,12 @@ import gzip
 import logging
 import argparse
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import tqdm
 from openai import OpenAI
 from indra.literature.pmc_client import id_lookup, get_text_s3
-from indra.literature.pubmed_client import get_abstract
+from indra.literature.pubmed_client import get_abstract, get_metadata_for_all_ids
 
 from trialsynth.ctgov.config import CTConfig
 from trialsynth.base.extract.extract import process_pmid
@@ -66,35 +67,189 @@ def get_intersection_pmids(limit: int = None) -> list[str]:
 
 
 def download_texts(pmids: list[str]):
+    # Download texts for PMIDs sequentially. Useful if the host environment has
+    # limited concurrency capabilities.
     logger.info(f"Downloading text for {len(pmids)} PMIDs...")
 
     for pmid in tqdm.tqdm(pmids):
-        if CONTENT_TXT_DIR.join(name=f"{pmid}.txt").exists():
+        _download_one_text(pmid)
+
+
+def _download_one_text(pmid: str) -> None:
+    # Tries PMC full text from S3 first, then falls back to the PubMed abstract.
+    # Writes ``<pmid>.txt`` to CONTENT_TXT_DIR on success.
+    if CONTENT_TXT_DIR.join(name=f"{pmid}.txt").exists():
+        return
+
+    try:
+        text = None
+
+        pmcid = id_lookup(pmid, idtype="pmid").get("pmcid")
+        if pmcid:
+            text = get_text_s3(pmcid)
+
+        if not text:
+            text = get_abstract(pmid, prepend_title=True)
+
+        if text:
+            CONTENT_TXT_DIR.join(name=f"{pmid}.txt").write_text(text, encoding="utf-8")
+        else:
+            tqdm.tqdm.write(f"{pmid} - NO CONTENT")
+
+    except Exception as e:
+        tqdm.tqdm.write(f"{pmid} - FAILED: {e}")
+
+
+def download_texts_parallel(pmids: list[str], max_workers: int = 8):
+    """Download texts for PMIDs concurrently.
+
+    Same per-PMID behavior as :func:`download_texts`, using a thread pool.
+
+    Parameters
+    ----------
+    pmids :
+        List of PMIDs to download text for.
+    max_workers :
+        Maximum number of worker threads. Default: 8.
+    """
+    logger.info(
+        f"Downloading text for {len(pmids)} PMIDs with {max_workers} workers..."
+    )
+
+    pending = [
+        pmid for pmid in pmids
+        if not CONTENT_TXT_DIR.join(name=f"{pmid}.txt").exists()
+    ]
+    skipped = len(pmids) - len(pending)
+    if skipped:
+        logger.info(f"Skipping {skipped} PMIDs with existing text files")
+
+    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
+        futures = [
+            executor.submit(_download_one_text, pmid) for pmid in pending
+        ]
+        for fut in tqdm.tqdm(as_completed(futures), total=len(futures)):
+            fut.result()
+
+
+def _overlay_fulltext_s3(pmid: str, pmcid: str, abstract) -> str:
+    try:
+        text = get_text_s3(pmcid)
+        if text:
+            CONTENT_TXT_DIR.join(name=f"{pmid}.txt").write_text(
+                text, encoding="utf-8"
+            )
+            return "s3"
+    except Exception as e:
+        tqdm.tqdm.write(f"{pmid} - S3 FAILED: {e}")
+
+    if abstract:
+        # _write_pmid_text(pmid, abstract)
+        CONTENT_TXT_DIR.join(name=f"{pmid}.txt").write_text(
+            abstract, encoding="utf-8"
+        )
+        return "abs"
+
+    tqdm.tqdm.write(f"{pmid} - NO CONTENT")
+    return "none"
+
+
+def download_texts_bulk(pmids: list[str], max_workers: int = 8):
+    """Download texts via a bulk PubMed metadata fetch plus optional S3 overlay.
+
+    Fetches PubMed XML in batches of 200 so abstracts and PMCIDs come back in
+    one pass. Abstracts are written immediately for PMIDs that have no PMCID.
+    PMIDs with a PMCID are then fetched from the PMC OA S3 bucket in parallel:
+    an S3 hit writes full text; a miss writes the abstract already returned by
+    the bulk fetch. PMIDs missing from the bulk response fall back to
+    per-PMID download.
+
+    Parameters
+    ----------
+    pmids :
+        List of PMIDs to download text for.
+    max_workers :
+        Maximum number of worker threads for S3 full-text overlay and
+        per-PMID fallback. Default: 8.
+    """
+    logger.info(f"Bulk-downloading text for {len(pmids)} PMIDs...")
+
+    pending = [
+        pmid for pmid in pmids
+        if not CONTENT_TXT_DIR.join(name=f"{pmid}.txt").exists()
+    ]
+    skipped = len(pmids) - len(pending)
+    if skipped:
+        logger.info(f"Skipping {skipped} PMIDs with existing text files")
+    if not pending:
+        return
+
+    metadata = get_metadata_for_all_ids(
+        pending, get_abstracts=True, prepend_title=True
+    ) or {}
+
+    n_abs = 0
+    n_no_content = 0
+    s3_jobs = []
+    missing = []
+    for pmid in tqdm.tqdm(pending, desc="Bulk metadata"):
+        rec = metadata.get(pmid)
+        if rec is None:
+            missing.append(pmid)
             continue
+        abstract = rec.get("abstract") or None
+        pmcid = rec.get("pmcid")
+        if pmcid:
+            s3_jobs.append((pmid, pmcid, abstract))
+        elif abstract:
+            CONTENT_TXT_DIR.join(name=f"{pmid}.txt").write_text(
+                abstract, encoding="utf-8"
+            )
+            n_abs += 1
+        else:
+            tqdm.tqdm.write(f"{pmid} - NO CONTENT")
+            n_no_content += 1
 
-        try:
-            text = None
-            source = ""
+    logger.info(
+        f"Bulk metadata: {n_abs} abstracts written, {len(s3_jobs)} with "
+        f"PMCID, {len(missing)} missing from response"
+    )
 
-            pmcid = id_lookup(pmid, idtype="pmid").get("pmcid")
-            if pmcid:
-                text = get_text_s3(pmcid)
-                if text:
-                    source = f"PMC-S3:{pmcid}"
+    n_s3 = 0
+    if s3_jobs:
+        with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
+            futures = [
+                executor.submit(_overlay_fulltext_s3, pmid, pmcid, abstract)
+                for pmid, pmcid, abstract in s3_jobs
+            ]
+            for fut in tqdm.tqdm(
+                as_completed(futures), total=len(futures), desc="S3 full text"
+            ):
+                status = fut.result()
+                if status == "s3":
+                    n_s3 += 1
+                elif status == "abs":
+                    n_abs += 1
+                else:
+                    n_no_content += 1
 
-            if not text:
-                text = get_abstract(pmid, prepend_title=True)
-                if text:
-                    source = "ABS"
+    if missing:
+        logger.info(
+            f"Falling back to per-PMID download for {len(missing)} PMIDs"
+        )
+        with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
+            futures = [
+                executor.submit(_download_one_text, pmid) for pmid in missing
+            ]
+            for fut in tqdm.tqdm(
+                as_completed(futures), total=len(futures), desc="PMID fallback"
+            ):
+                fut.result()
 
-            if text:
-                CONTENT_TXT_DIR.join(name=f"{pmid}.txt").write_text(text, encoding="utf-8")
-                logger.info(f"{pmid} ({source}) - OK")
-            else:
-                logger.info(f"{pmid} - NO CONTENT")
-
-        except Exception as e:
-            logger.info(f"{pmid} - FAILED: {e}")
+    logger.info(
+        f"Bulk download complete: {n_abs} abstracts, {n_s3} S3 full texts, "
+        f"{n_no_content} with no content"
+    )
 
 
 def run_extraction(pmids: list[str]):
