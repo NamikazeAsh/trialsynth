@@ -5,19 +5,18 @@ Unit tests for trialsynth.base.extract.ground_results.
 import gilda
 
 from trialsynth.base.extract.ground_results import (
+    AE_SHORT_TOKEN_MIN_LEN_DEFAULT,
+    CRITERIA_NAMESPACES,
     _annotate_fallback,
     _get_grounder,
     _normalize_ae_text,
     _oae_terms,
     get_gilda_grounding,
     ground_adverse_event,
+    ground_extraction,
     ground_marker,
 )
 
-
-# ---------------------------------------------------------------------------
-# _normalize_ae_text  (pure string, no Gilda)
-# ---------------------------------------------------------------------------
 
 def test_normalize_ae_text_collapses_spaces():
     """Multiple internal spaces are collapsed to a single space."""
@@ -39,11 +38,6 @@ def test_normalize_ae_text_empty_string():
     assert _normalize_ae_text("") == ""
 
 
-# ---------------------------------------------------------------------------
-# get_gilda_grounding
-# ---------------------------------------------------------------------------
-
-
 def test_get_gilda_grounding_brca1():
     """BRCA1 grounds to HGNC:1100 with correct structure."""
     result = get_gilda_grounding("BRCA1", sources=["HGNC"])
@@ -53,10 +47,6 @@ def test_get_gilda_grounding_brca1():
     assert result["entry_name"] == "BRCA1"
     assert isinstance(result["score"], float)
 
-
-# ---------------------------------------------------------------------------
-# ground_marker
-# ---------------------------------------------------------------------------
 
 def test_ground_marker_single_char_filtered():
     """Single-character symbols are skipped before any Gilda call."""
@@ -93,10 +83,6 @@ def test_ground_marker_no_variant_returns_none():
     assert result["variant"] is None
 
 
-# ---------------------------------------------------------------------------
-# _annotate_fallback
-# ---------------------------------------------------------------------------
-
 def test_annotate_fallback_returns_hgnc_hits():
     """BRCA1 embedded in a sentence is found and returned as an HGNC hit."""
     hits = _annotate_fallback("Patients positive for BRCA1 were excluded.")
@@ -125,11 +111,6 @@ def test_annotate_fallback_short_match_filtered():
     kit_hits = [h for h in hits if h["symbol"].upper() == "KIT"]
     assert kit_hits == []
 
-
-
-# ---------------------------------------------------------------------------
-# ground_adverse_event
-# ---------------------------------------------------------------------------
 
 def test_ground_adverse_event_below_min_len_returns_none():
     """Input shorter than min_len is rejected before any Gilda call."""
@@ -180,10 +161,6 @@ def test_ground_adverse_event_mesh_term_not_hijacked_by_oae():
     assert result["db"] == "MESH"
 
 
-# ---------------------------------------------------------------------------
-# _get_grounder  (trialsynth-owned grounder: isolation and caching)
-# ---------------------------------------------------------------------------
-
 def test_get_grounder_does_not_mutate_global_gilda_grounder():
     """Building the trialsynth grounder must not add OAE terms to Gilda's default grounder."""
     _get_grounder()
@@ -196,10 +173,6 @@ def test_get_grounder_builds_once_and_reuses_instance():
     second = _get_grounder()
     assert first is second
 
-
-# ---------------------------------------------------------------------------
-# _oae_terms  (OAE OWL parsing)
-# ---------------------------------------------------------------------------
 
 def test_oae_terms_returns_non_empty_list():
     """Parsing oae.owl produces at least one Term."""
@@ -222,5 +195,54 @@ def test_oae_terms_strips_ae_suffix_into_synonym():
     assert ae_labels, "expected at least one OAE label ending in ' AE'"
     stripped = ae_labels[0][: -len(" AE")]
     assert stripped in synonyms
+
+
+def test_ground_extraction():
+    """Grounding mutates the input dict in place and returns that same object."""
+    data = {
+        "pmid": "12345",
+        "genetic": {
+            "markers": [
+                {
+                    "text": "BRCA1",
+                    "evidence_text": "BRCA1 mutation was required.",
+                    "role": "inclusion",
+                }
+            ]
+        },
+        "inclusion_criteria": [
+            {"text": "diabetes", "evidence_text": "Patients with diabetes were included."}
+        ],
+        "arms": [
+            {
+                "arm_name": "placebo",
+                "adverse_events": [
+                    {"event_name": "nausea", "source_sentence": "Nausea was common."}
+                ],
+            }
+        ],
+    }
+
+    result = ground_extraction(data, ae_min_len=AE_SHORT_TOKEN_MIN_LEN_DEFAULT)
+
+    assert result is data
+
+    markers = data["genetic"]["grounded_markers"]
+    assert len(markers) == 1
+    assert markers[0]["role"] == "inclusion"
+    assert markers[0]["groundings"][0]["info"]["db"] == "HGNC"
+    assert markers[0]["groundings"][0]["info"]["id"] == "1100"
+    assert data["genetic"]["grounded_inclusion"] == markers
+
+    inclusion = data["grounded_inclusion_criteria"]
+    assert len(inclusion) == 1
+    assert inclusion[0]["text"] == "diabetes"
+    assert inclusion[0]["grounding"] is not None
+    assert inclusion[0]["grounding"]["db"] in CRITERIA_NAMESPACES
+
+    ae = data["arms"][0]["adverse_events"][0]
+    assert ae["grounding"] is not None
+    assert ae["grounding"]["db"] == "MESH"
+    assert ae["grounding"]["source"] == "ground"
 
 

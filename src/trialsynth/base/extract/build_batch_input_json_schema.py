@@ -8,16 +8,14 @@ from trialsynth.base.extract.resources import (
     TRIAL_RESULT_SCHEMA_ANCHOR,
 )
 
-MIN_NUM_RECORDS = 100
 MAX_RECORDS_PER_FILE = 10000
 ANTHROPIC_VERSION = "bedrock-2023-05-31"
 MAX_TOKENS = 16000
-OUT_PATH = Path(__file__).parent.parent / "outputs" / "batch_input_json_schema_100.jsonl"
 
 
 def build_batch_input_jsonl(
     articles: list[tuple[str, str, Path | str]],
-    out_path: Path = OUT_PATH,
+    out_path: Path | str,
     prompt: str = PROMPT,
     schema=None,
     max_records: int = MAX_RECORDS_PER_FILE,
@@ -48,11 +46,7 @@ def build_batch_input_jsonl(
     """
     if schema is None:
         schema = TRIAL_RESULT_SCHEMA_ANCHOR
-    if len(articles) < MIN_NUM_RECORDS:
-        raise RuntimeError(
-            f"Only {len(articles)} articles provided, need at least {MIN_NUM_RECORDS} "
-            f"for batch processing."
-        )
+    out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     n = len(articles)

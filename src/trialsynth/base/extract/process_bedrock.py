@@ -1,15 +1,13 @@
 """Turn Bedrock JSONL extraction output into grounded per-PMID JSON.
 
 Reads Bedrock batch ``*.jsonl.out`` records, resolves ``evidence_anchor``
-fields to full sentences, then grounds the result. Grounded files are written
-to ``RESULTS_GROUNDED_DIR``; resolved JSON is kept only in a temporary
-directory for ``ground_json``.
+fields to full sentences, grounds the result in memory, and writes grounded
+files to ``RESULTS_GROUNDED_DIR``.
 """
 
 import json
 import logging
 import re
-import tempfile
 from pathlib import Path
 
 import click
@@ -18,7 +16,7 @@ from tqdm import tqdm
 from trialsynth.base.extract.extract_util import resolve_anchors, split_sentences
 from trialsynth.base.extract.ground_results import (
     AE_SHORT_TOKEN_MIN_LEN_DEFAULT,
-    ground_json,
+    ground_extraction,
 )
 from trialsynth.base.extract.paths import RESULTS_GROUNDED_DIR
 
@@ -83,7 +81,6 @@ def _process_record(
     pmid: str,
     extraction: dict,
     source_text: str,
-    temp_dir: Path,
     output_path: Path,
     ae_min_len: int,
 ) -> None:
@@ -92,22 +89,21 @@ def _process_record(
     Parameters
     ----------
     pmid :
-        PubMed ID used as the temporary filename stem.
+        PubMed ID from the Bedrock recordId; set on the extraction if missing.
     extraction :
         Parsed LLM JSON (mutated in place by ``resolve_anchors``).
     source_text :
         Article text the model saw, used to resolve anchors.
-    temp_dir :
-        Directory for the resolved JSON consumed by ``ground_json``.
     output_path :
         Destination grounded JSON path.
     ae_min_len :
-        Passed through to ``ground_json``.
+        Passed through to ``ground_extraction``.
     """
     resolved = resolve_anchors(extraction, split_sentences(source_text))
-    raw_path = temp_dir / f"{pmid}.json"
-    raw_path.write_text(json.dumps(resolved), encoding="utf-8")
-    _ = ground_json(raw_path, output_path, ae_min_len=ae_min_len)
+    if not resolved.get("pmid"):
+        resolved["pmid"] = pmid
+    grounded = ground_extraction(resolved, ae_min_len=ae_min_len)
+    output_path.write_text(json.dumps(grounded, indent=2), encoding="utf-8")
 
 
 def _count_records(jsonl_paths: list[Path]) -> int:
@@ -186,43 +182,40 @@ def main(
     output_dir.mkdir(parents=True, exist_ok=True)
     n_ok = n_skip = n_fail = 0
 
-    with tempfile.TemporaryDirectory() as tmp:
-        temp_dir = Path(tmp)
-        for jsonl_path, line_no, line in tqdm(
-            _iter_lines(jsonl_paths),
-            desc="Records",
-            unit="rec",
-            total=_count_records(jsonl_paths),
-        ):
-            if limit is not None and n_ok >= limit:
-                break
-            loc = f"{jsonl_path.name}:{line_no}"
-            try:
-                pmid, extraction, source_text = _parse_record(line)
-            except Exception as exc:
-                n_fail += 1
-                logger.warning("Failed to parse %s: %s", loc, exc)
-                continue
+    for jsonl_path, line_no, line in tqdm(
+        _iter_lines(jsonl_paths),
+        desc="Records",
+        unit="rec",
+        total=_count_records(jsonl_paths),
+    ):
+        if limit is not None and n_ok >= limit:
+            break
+        loc = f"{jsonl_path.name}:{line_no}"
+        try:
+            pmid, extraction, source_text = _parse_record(line)
+        except Exception as exc:
+            n_fail += 1
+            logger.warning("Failed to parse %s: %s", loc, exc)
+            continue
 
-            out_path = output_dir / f"{pmid}.json"
-            if out_path.exists() and not overwrite:
-                n_skip += 1
-                continue
+        out_path = output_dir / f"{pmid}.json"
+        if out_path.exists() and not overwrite:
+            n_skip += 1
+            continue
 
-            try:
-                _process_record(
-                    pmid,
-                    extraction,
-                    source_text,
-                    temp_dir,
-                    out_path,
-                    ae_min_len,
-                )
-            except Exception as exc:
-                n_fail += 1
-                logger.warning("Failed to process PMID %s (%s): %s", pmid, loc, exc)
-                continue
-            n_ok += 1
+        try:
+            _process_record(
+                pmid,
+                extraction,
+                source_text,
+                out_path,
+                ae_min_len,
+            )
+        except Exception as exc:
+            n_fail += 1
+            logger.warning("Failed to process PMID %s (%s): %s", pmid, loc, exc)
+            continue
+        n_ok += 1
 
     click.echo(
         f"Processed: {n_ok}  skipped: {n_skip}  failed: {n_fail}\n"
