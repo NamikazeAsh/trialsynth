@@ -1,34 +1,18 @@
 """
-Orchestrator: intersection PMIDs -> text download -> anchor extraction ->
-grounded JSONs.
-
-Usage:
-    python orchestrate.py           # default: 1000 PMIDs
-    python orchestrate.py --limit 500
-
-Two-stage checkpointing:
-- Text download: skipped if <pmid>.txt already exists in txt_archive
-- Extraction:    skipped if <pmid>.json already exists in output_dir
-
-Re-running safely resumes from wherever it left off.
+Todo: write file docstring
 """
 
 import csv
 import gzip
 import logging
-import argparse
-from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import tqdm
-from openai import OpenAI
 from indra.literature.pmc_client import id_lookup, get_text_s3
 from indra.literature.pubmed_client import get_abstract, get_metadata_for_all_ids
 
 from trialsynth.ctgov.config import CTConfig
-from trialsynth.base.extract.extract import process_pmid
-from trialsynth.base.extract.paths import RESULTS_RAW_DIR, RESULTS_DIR, \
-    CONTENT_TXT_DIR
+from trialsynth.base.extract.paths import CONTENT_TXT_DIR
 
 
 logger = logging.getLogger('trialsynth.base.extract.orchestrate')
@@ -250,73 +234,3 @@ def download_texts_bulk(pmids: list[str], max_workers: int = 8):
         f"Bulk download complete: {n_abs} abstracts, {n_s3} S3 full texts, "
         f"{n_no_content} with no content"
     )
-
-
-def run_extraction(pmids: list[str]):
-    logger.info(f"Running anchor extraction on {len(pmids)} PMIDs...")
-    client = OpenAI()
-    stats = []
-
-    for pmid in pmids:
-        row = process_pmid(pmid, client, CONTENT_TXT_DIR.base, RESULTS_RAW_DIR.base)
-        stats.append(row)
-        if row["status"] == "ok":
-            logger.info(f"  {pmid} extracted ({row['output_tokens']} output tokens)")
-        elif row["status"] == "skipped":
-            logger.info(f"  {pmid} skipped (already exists)")
-        else:
-            logger.warning(f"  {pmid} -> {row['status']}")
-
-    statuses = Counter(r["status"] for r in stats)
-
-    n_errors = (
-        len(statuses) - statuses['ok'] - statuses['skipped'] - statuses['missing_text']
-    )
-    logger.info(
-        f"Extraction complete: {statuses['ok']} new, {statuses['skipped']} skipped, "
-        f"{statuses['missing_text']} missing text, {n_errors} errors"
-    )
-    if statuses.get('completed'):
-        total_out = sum(r["output_tokens"] for r in stats if r["status"] == "completed")
-        logger.info(f"Avg output tokens/paper: {total_out // statuses['completed']}")
-
-    csv_path = RESULTS_DIR.join(name="extraction_stats.csv")
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(
-            f, fieldnames=["pmid", "status", "input_tokens", "output_tokens"]
-        )
-        writer.writeheader()
-        writer.writerows(stats)
-    logger.info(f"Stats saved to {csv_path}")
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--limit", type=int, default=1000,
-                        help="Max PMIDs to process (default: 1000)")
-    args = parser.parse_args()
-
-    pmids_path = RESULTS_DIR.join(name="intersection_pmids.csv")
-
-    if pmids_path.exists():
-        with open(pmids_path, "r") as f:
-            saved = [line.strip() for line in f if line.strip()]
-    else:
-        saved = []
-
-    if len(saved) >= args.limit:
-        pmids = saved[:args.limit]
-        logger.info(f"Loaded {len(pmids)} PMIDs from {pmids_path}")
-    else:
-        pmids = get_intersection_pmids(limit=args.limit)
-        with open(pmids_path, "w") as f:
-            for pmid in pmids:
-                f.write(pmid + "\n")
-        logger.info(f"Saved {len(pmids)} PMIDs to {pmids_path}")
-
-    download_texts(pmids)
-    run_extraction(pmids)
-
-
-if __name__ == "__main__":
-    main()
