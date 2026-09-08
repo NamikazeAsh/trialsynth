@@ -23,7 +23,6 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-  "addict (~=2.4)",
   "bioregistry (~=0.12.13)",
   "click (~=8.1)",
   "gilda (~=1.1)",
@@ -31,6 +30,7 @@ dependencies = [
   "overrides (~=7.7)",
   "pandas (~=2.2)",
   "pydantic[email] (~=2.7)",
+  "pystow (~=0.7.8)",
   "requests (~=2.31)",
   "tqdm (~=4.66)",
 ]
@@ -44,4 +44,7 @@ scispacy = [
   "scispacy (~=0.5.5)",
   "spacy (~=3.7)",  # https://github.com/allenai/scispacy/blob/v0.5.5/setup.py#L44
   "numpy (~=1.26)",  # https://github.com/allenai/scispacy/issues/536
+]
+llm = [
+  "boto3"
 ]
