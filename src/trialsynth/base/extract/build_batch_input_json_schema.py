@@ -19,21 +19,22 @@ def build_batch_input_jsonl(
     prompt: str = PROMPT,
     schema=None,
     max_records: int = MAX_RECORDS_PER_FILE,
-) -> None:
+) -> list[Path]:
     """Write Bedrock batch input JSONL for clinical trial article extraction.
 
-    If the number of articles exceeds ``max_records``, the output is split
-    into multiple files named ``<stem>_<end_index><suffix>``. For 28741
-    articles and a max of 10000, that is ``outfile_10000.jsonl``,
-    ``outfile_20000.jsonl``, ``outfile_28741.jsonl``.
+    Output is always written as ``<stem>_input_<end_index>.jsonl`` so input files
+    match the ``*_input_{N}.jsonl`` pattern used by extract multi-job submission.
+    A single chunk still uses this pattern: ``-o /my/input/dir/run.jsonl`` with 500
+    records writes ``/my/input/dir/run_input_500.jsonl``. For 28741 articles and a
+    max of 10000, that is ``/my/input/dir/run_input_10000.jsonl``,
+    ``/my/input/dir/run_input_20000.jsonl``, ``/my/input/dir/run_input_28741.jsonl``.
 
     Parameters
     ----------
     articles :
         List of (articleId, pmid, article_path) tuples.
     out_path :
-        Output JSONL file path. Used as-is when no split is needed; otherwise
-        the stem is used as a prefix for the chunk files.
+        Output JSONL path whose stem is used as the prefix.
     prompt :
         Prompt text to use for the model input. Default is the prompt defined in
         resources/prompt.txt.
@@ -43,6 +44,11 @@ def build_batch_input_jsonl(
     max_records :
         Maximum number of records per output file. If more articles are
         provided, the output is split. Default is 10000.
+
+    Returns
+    -------
+    :
+        Local input file paths that were written, in order.
     """
     if schema is None:
         schema = TRIAL_RESULT_SCHEMA_ANCHOR
@@ -50,14 +56,10 @@ def build_batch_input_jsonl(
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     n = len(articles)
-    split = n > max_records
+    written: list[Path] = []
     for start in range(0, n, max_records):
         end = min(start + max_records, n)
-        chunk_path = (
-            out_path.with_name(f"{out_path.stem}_{end}{out_path.suffix}")
-            if split
-            else out_path
-        )
+        chunk_path = out_path.with_name(f"{out_path.stem}_input_{end}.jsonl")
         with open(chunk_path, "w", encoding="utf-8") as out:
             for article_id, pmid, article_path in articles[start:end]:
                 text = Path(article_path).read_text(encoding="utf-8")
@@ -77,6 +79,8 @@ def build_batch_input_jsonl(
                 }
                 record = {"recordId": article_id, "modelInput": model_input}
                 out.write(json.dumps(record) + "\n")
+        written.append(chunk_path)
+    return written
 
 
 def main(
@@ -84,7 +88,7 @@ def main(
     out_path: Path | str,
     content_dir: Path | None = None,
     max_records: int = MAX_RECORDS_PER_FILE,
-) -> None:
+) -> list[Path]:
     """Build batch input JSONL from PMIDs.
 
     Uses each PMID as the Bedrock recordId. Article text is read from
@@ -95,13 +99,18 @@ def main(
     pmids :
         PMIDs to include in the batch input.
     out_path :
-        Output JSONL file path. Split into ``<stem>_<end_index><suffix>``
-        files if the number of PMIDs exceeds ``max_records``.
+        Output JSONL path whose stem is used for
+        ``<stem>_input_<end_index>.jsonl`` input files.
     content_dir :
         Directory containing ``<pmid>.txt`` files. Defaults to the
         trialsynth content/txt store.
     max_records :
         Maximum number of records per output file. Default is 10000.
+
+    Returns
+    -------
+    :
+        Local input file paths that were written, in order.
     """
     if content_dir is None:
         content_dir = CONTENT_TXT_DIR.base
@@ -123,7 +132,7 @@ def main(
             f"{preview}{extra}"
         )
 
-    build_batch_input_jsonl(
+    return build_batch_input_jsonl(
         articles, out_path=Path(out_path), max_records=max_records
     )
 
@@ -157,7 +166,7 @@ if __name__ == "__main__":
         default=MAX_RECORDS_PER_FILE,
         help=(
             "Maximum records per output file. Larger inputs are split into "
-            "files named <stem>_<end_index><suffix>. Default: 10000."
+            "files named <stem>_input_<end_index>.jsonl. Default: 10000."
         ),
     )
     args = parser.parse_args()
@@ -169,4 +178,4 @@ if __name__ == "__main__":
         ]
     else:
         pmids = args.pmids
-    main(pmids, args.output, max_records=args.max_records)
+    _ = main(pmids, args.output, max_records=args.max_records)
