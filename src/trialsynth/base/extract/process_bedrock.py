@@ -173,7 +173,7 @@ def main(
 ) -> None:
     """Ground Bedrock JSONL extraction output.
 
-    INPUT_PATH is a JSONL file or a directory of ``*.jsonl.out`` shards.
+    INPUT_PATH is a JSONL file or a directory of ``*.jsonl.out`` files.
     """
     jsonl_paths = _jsonl_paths(input_path)
     if not jsonl_paths:
