@@ -46,5 +46,7 @@ scispacy = [
   "numpy (~=1.26)",  # https://github.com/allenai/scispacy/issues/536
 ]
 llm = [
-  "boto3"
+  "boto3",
+  "indra_db (~=0.1.0)",
+  "indra_db_lite (~=0.1.0)",
 ]
