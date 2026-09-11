@@ -178,6 +178,203 @@ def get_trial_pmids() -> list[str]:
     return sorted(intersection)
 
 
+def get_pmid_texts(pmids: list[str]) -> dict:
+    """Return title, abstract, and full text for each PMID.
+
+    Tries the SQLite lite DB first when configured, then the Postgres
+    INDRA DB, then PubMed metadata and PMC S3. Full text is preferred
+    over abstract. Title is always included.
+
+    Parameters
+    ----------
+    pmids :
+        PubMed IDs.
+
+    Returns
+    -------
+    :
+        Mapping from PMID to a dict with ``title`` and optionally
+        ``abstract`` or ``fulltext``.
+    """
+    pmid_strs = set(str(pmid) for pmid in pmids)
+    out = {pmid: {"title": ""} for pmid in pmid_strs}
+    filled = set()
+    pbar = tqdm.tqdm(
+        total=len(pmid_strs), desc="Fetching PMID texts", unit="pmid"
+    )
+
+    def _note_filled(pmid: str) -> None:
+        if pmid in filled or pmid not in out:
+            return
+        rec = out[pmid]
+        if rec.get("title") or rec.get("abstract") or rec.get("fulltext"):
+            filled.add(pmid)
+            pbar.update(1)
+
+    try:
+        from indra.config import has_config
+        if has_config("INDRA_DB_LITE_LOCATION"):
+            from indra_db_lite import (
+                get_paragraphs_for_text_ref_ids,
+                get_text_ref_ids_for_pmids,
+            )
+            pmid_to_trid = get_text_ref_ids_for_pmids(
+                [int(pmid) for pmid in pmid_strs]
+            )
+            trid_to_pmid = {
+                trid: str(pmid) for pmid, trid in pmid_to_trid.items()
+            }
+            if pmid_to_trid:
+                content = get_paragraphs_for_text_ref_ids(pmid_to_trid.values())
+                for trid, paragraphs in content.fulltexts.items():
+                    pmid = trid_to_pmid[trid]
+                    text = "\n".join(p for p in paragraphs if p)
+                    if text:
+                        out[pmid]["fulltext"] = text
+                        _note_filled(pmid)
+                for trid, paragraphs in content.abstracts.items():
+                    pmid = trid_to_pmid[trid]
+                    if paragraphs:
+                        out[pmid]["title"] = paragraphs[0] or ""
+                    abstract = "\n".join(p for p in paragraphs[1:] if p)
+                    if abstract:
+                        out[pmid]["abstract"] = abstract
+                    _note_filled(pmid)
+                for trid, paragraphs in content.titles.items():
+                    pmid = trid_to_pmid[trid]
+                    if paragraphs and paragraphs[0]:
+                        out[pmid]["title"] = paragraphs[0]
+                        _note_filled(pmid)
+        else:
+            print("DEBUG: indra_db_lite is not available for text retrieval")
+            logger.info("INDRA_DB_LITE_LOCATION is not set in the environment, falling back to INDRA DB")
+    except Exception as e:
+        print("DEBUG: indra_db_lite is not available for text retrieval: %s", e)
+        logger.info("indra_db_lite is not available for text retrieval: %s", e)
+
+    need_content = [
+        pmid for pmid in pmid_strs
+        if "fulltext" not in out[pmid]
+        and "abstract" not in out[pmid]
+        and not out[pmid]["title"]
+    ]
+    need_title = [pmid for pmid in pmid_strs if not out[pmid]["title"]]
+    if need_content or need_title:
+        try:
+            from indra.literature.adeft_tools import universal_extract_text
+            from indra_db.client.principal.content import get_text
+            from indra_db.util import get_db
+            from indra_db.util.content_scripts import get_text_content_from_pmids
+
+            db = get_db("primary")
+            if db is None:
+                raise ValueError("Primary database is not available")
+            if need_title:
+                for pmid, title in get_text(db, need_title, "title").items():
+                    pmid = str(pmid)
+                    if pmid in out and title and not out[pmid]["title"]:
+                        out[pmid]["title"] = title
+                        _note_filled(pmid)
+            if need_content:
+                identifiers, content = get_text_content_from_pmids(
+                    need_content, db=db
+                )
+                for pmid, ident in identifiers.items():
+                    pmid = str(pmid)
+                    if pmid not in out or "fulltext" in out[pmid]:
+                        continue
+                    raw = content.get(ident)
+                    if not raw:
+                        continue
+                    text = universal_extract_text(raw)
+                    if not text:
+                        continue
+                    text_type = ident[3]
+                    if text_type == "fulltext":
+                        out[pmid]["fulltext"] = text
+                        out[pmid].pop("abstract", None)
+                    elif text_type in ["abstract", "elsevier_abstract"]:
+                        out[pmid]["abstract"] = text
+                    elif text_type == "title" and not out[pmid]["title"]:
+                        out[pmid]["title"] = text
+                    else:
+                        continue
+                    _note_filled(pmid)
+        except Exception as e:
+            print(f"DEBUG: get_text_content_from_pmids failed: {e}")
+            logger.info("INDRA DB is not available for text retrieval: %s", e)
+
+    need_live = [
+        pmid for pmid in pmid_strs
+        if not out[pmid]["title"]
+        or ("fulltext" not in out[pmid] and "abstract" not in out[pmid])
+    ]
+    try:
+        if need_live:
+            metadata = get_metadata_for_all_ids(
+                need_live, get_abstracts=True, prepend_title=False
+            ) or {}
+            missing = []
+            s3_jobs = []
+            for pmid in need_live:
+                rec = metadata.get(pmid)
+                if rec is None:
+                    missing.append(pmid)
+                    continue
+                title = rec.get("title") or ""
+                if title and not out[pmid]["title"]:
+                    out[pmid]["title"] = title
+                    _note_filled(pmid)
+                if "fulltext" in out[pmid]:
+                    continue
+                abstract = rec.get("abstract") or None
+                pmcid = rec.get("pmcid")
+                if pmcid:
+                    s3_jobs.append((pmid, pmcid, abstract))
+                elif abstract:
+                    out[pmid]["abstract"] = abstract
+                    _note_filled(pmid)
+
+            if s3_jobs:
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    futures = {
+                        executor.submit(get_text_s3, pmcid): (pmid, abstract)
+                        for pmid, pmcid, abstract in s3_jobs
+                    }
+                    for fut in as_completed(futures):
+                        pmid, abstract = futures[fut]
+                        try:
+                            text = fut.result()
+                        except Exception as e:
+                            logger.info("%s - S3 FAILED: %s", pmid, e)
+                            text = None
+                        if text:
+                            out[pmid]["fulltext"] = text
+                            out[pmid].pop("abstract", None)
+                        elif abstract:
+                            out[pmid]["abstract"] = abstract
+                        _note_filled(pmid)
+
+            for pmid in missing:
+                try:
+                    pmcid = id_lookup(pmid, idtype="pmid").get("pmcid")
+                    text = get_text_s3(pmcid) if pmcid else None
+                    if text:
+                        out[pmid]["fulltext"] = text
+                        out[pmid].pop("abstract", None)
+                    elif "fulltext" not in out[pmid]:
+                        abstract = get_abstract(pmid, prepend_title=False)
+                        if abstract:
+                            out[pmid]["abstract"] = abstract
+                    _note_filled(pmid)
+                except Exception as e:
+                    print("DEBUG: FAILED: %s", e)
+                    logger.info("%s - FAILED: %s", pmid, e)
+    finally:
+        pbar.close()
+    return out
+
+
 def download_texts(pmids: list[str]):
     """Download texts for PMIDs sequentially
 
