@@ -9,31 +9,25 @@ from trialsynth.base.extract.build_batch_input_json_schema import (
 from trialsynth.base.extract.extract_bedrock import INPUT_FILE_RE
 
 
-def _write_articles(tmp_path, n: int):
-    # Create n fake <pmid>.txt files and matching (id, pmid, path) tuples.
-    articles = []
-    for i in range(1, n + 1):
-        pmid = str(i)
-        path = tmp_path / f"{pmid}.txt"
-        path.write_text(f"article {pmid}", encoding="utf-8")
-        articles.append((pmid, pmid, path))
-    return articles
+def _articles(n: int):
+    # In-memory (articleId, pmid, text) tuples.
+    return [(str(i), str(i), f"article {i}") for i in range(1, n + 1)]
 
 
 def test_single_chunk_uses_input_n_name(tmp_path):
     # Two articles fit in one file when max_records is large.
-    articles = _write_articles(tmp_path, 2)
+    articles = _articles(2)
     written = build_batch_input_jsonl(
         articles,
-        tmp_path / "run.jsonl",
+        tmp_path,
         prompt="test prompt",
         schema={"type": "object"},
-        max_records=10000,
+        max_records=10,
     )
-    # Output is <stem>_input_<n>.jsonl
+    # Output is <prefix>_input_<n>.jsonl
     assert [path.name for path in written] == ["run_input_2.jsonl"]
+    assert written[0] == tmp_path / "run_input_2.jsonl"
     assert written[0].exists()
-    assert not (tmp_path / "run.jsonl").exists()
     # Name should match the extract multi-job *_input_{N}.jsonl file name regex.
     assert INPUT_FILE_RE.search(written[0].name)
     # Check that the JSONL file has the expected record content.
@@ -46,10 +40,10 @@ def test_single_chunk_uses_input_n_name(tmp_path):
 
 def test_multi_chunk_uses_input_end_index(tmp_path):
     # Five articles with max_records=2 should split into three files.
-    articles = _write_articles(tmp_path, 5)
+    articles = _articles(5)
     written = build_batch_input_jsonl(
         articles,
-        tmp_path / "run.jsonl",
+        tmp_path,
         prompt="test prompt",
         schema={"type": "object"},
         max_records=2,
@@ -71,29 +65,71 @@ def test_multi_chunk_uses_input_end_index(tmp_path):
 
 
 def test_builder_main_missing_pmid_lists_ids(tmp_path):
-    # Only PMID 1 has a text file; 2 and 3 are missing.
-    (tmp_path / "1.txt").write_text("ok", encoding="utf-8")
-    with pytest.raises(FileNotFoundError, match=r"2\.txt|2") as exc_info:
+    # Only PMID 111 is in the cache mapping; 112 and 113 are missing.
+    with pytest.raises(ValueError, match=r"2") as exc_info:
         build_batch_input(
-            ["1", "2", "3"],
-            tmp_path / "run.jsonl",
-            content_dir=tmp_path,
+            ["111", "112", "113"],
+            tmp_path,
+            texts={"111": {"title": "ok"}},
         )
     # Error message names the missing PMIDs.
     message = str(exc_info.value)
-    assert "2" in message
-    assert "3" in message
+    assert "112" in message
+    assert "113" in message
 
 
 def test_builder_main_writes_input_named_file(tmp_path):
     # PMID-based builder should write the same *_input_{N}.jsonl names.
-    (tmp_path / "123.txt").write_text("hello", encoding="utf-8")
     written = build_batch_input(
         ["123"],
-        tmp_path / "run.jsonl",
-        content_dir=tmp_path,
-        max_records=10000,
+        tmp_path,
+        texts={"123": {"title": "hello"}},
     )
     assert written == [tmp_path / "run_input_1.jsonl"]
     assert written[0].exists()
     assert INPUT_FILE_RE.search(written[0].name)
+
+
+def test_builder_prefers_fulltext_over_abstract(tmp_path):
+    # Prompt body uses fulltext when both fulltext and abstract are present.
+    written = build_batch_input(
+        ["111"],
+        tmp_path,
+        texts={
+            "111": {
+                "title": "Title",
+                "abstract": "Abstract body",
+                "fulltext": "Full text body",
+            }
+        },
+    )
+    rec = json.loads(written[0].read_text(encoding="utf-8").splitlines()[0])
+    content = rec["modelInput"]["messages"][0]["content"]
+    assert "Full text body" in content
+    assert "Abstract body" not in content
+
+
+def test_builder_falls_back_to_abstract(tmp_path):
+    # Prompt body uses abstract when fulltext is absent.
+    written = build_batch_input(
+        ["111"],
+        tmp_path,
+        texts={"111": {"title": "Title", "abstract": "Abstract body"}},
+    )
+    rec = json.loads(written[0].read_text(encoding="utf-8").splitlines()[0])
+    content = rec["modelInput"]["messages"][0]["content"]
+    assert "Abstract body" in content
+
+
+def test_custom_prefix_names_output_files(tmp_path):
+    # --prefix becomes the filename prefix for *_input_{N}.jsonl files.
+    articles = _articles(1)
+    written = build_batch_input_jsonl(
+        articles,
+        tmp_path,
+        prefix="bedrock_test",
+        prompt="test prompt",
+        schema={"type": "object"},
+    )
+    assert written == [tmp_path / "bedrock_test_input_1.jsonl"]
+    assert written[0].exists()
