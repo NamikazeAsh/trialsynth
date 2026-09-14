@@ -6,11 +6,11 @@ import boto3
 import click
 
 from trialsynth.base.extract.build_batch_input_json_schema import (
+    DEFAULT_PREFIX,
     MAX_RECORDS_PER_FILE,
     main as build_batch_input,
 )
 from trialsynth.base.extract.extract_bedrock import (
-    DEFAULT_REGION,
     _is_jsonl_object_uri,
     _is_s3_uri,
     _parse_s3_uri,
@@ -103,13 +103,16 @@ def cli():
 @click.option(
     "-o",
     "--output",
-    "out_path",
-    type=click.Path(dir_okay=False, path_type=Path),
+    "out_dir",
+    type=click.Path(file_okay=False, path_type=Path),
     required=True,
-    help=(
-        "Output JSONL path for JSONL input files. Files are written as "
-        "<stem>_input_<end>.jsonl (e.g. run.jsonl -> run_input_500.jsonl)."
-    ),
+    help="Directory to write *_input_{N}.jsonl files into.",
+)
+@click.option(
+    "--prefix",
+    default=DEFAULT_PREFIX,
+    show_default=True,
+    help="Filename prefix. Files are written as <prefix>_input_<end>.jsonl.",
 )
 @click.option(
     "--s3-uri",
@@ -131,23 +134,17 @@ def cli():
     type=int,
     default=8,
     show_default=True,
-    help="Worker threads for download_texts_bulk.",
-)
-@click.option(
-    "--region",
-    default=DEFAULT_REGION,
-    show_default=True,
-    help="AWS region for optional S3 upload.",
+    help="Worker threads for PMC S3 full-text fetch.",
 )
 def prepare(
     pmids: tuple[str, ...],
     pmid_file: Path | None,
     limit: int | None,
-    out_path: Path,
+    out_dir: Path,
+    prefix: str,
     s3_uri: str | None,
     max_records: int,
     max_workers: int,
-    region: str,
 ) -> None:
     """Download texts and write Bedrock batch input JSONL.
 
@@ -166,13 +163,17 @@ def prepare(
     if not resolved:
         raise click.UsageError("No PMIDs to prepare")
 
-    download_texts_bulk(resolved, max_workers=max_workers)
+    cache = download_texts_bulk(resolved, max_workers=max_workers)
 
     try:
         written = build_batch_input(
-            resolved, out_path=out_path, max_records=max_records
+            resolved,
+            out_dir=out_dir,
+            texts=cache,
+            prefix=prefix,
+            max_records=max_records,
         )
-    except FileNotFoundError as exc:
+    except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
     if not written:
@@ -191,11 +192,13 @@ def prepare(
             raise click.UsageError(
                 f"--s3-uri must be a .jsonl object URI or a prefix ending with '/', got {s3_uri!r}"
             )
-        s3 = boto3.client("s3", region_name=region)
+        s3 = boto3.client("s3")
         for path, bucket, key in _s3_upload_targets(written, s3_uri):
             s3.upload_file(str(path), bucket, key)
             click.echo(f"Uploaded {path} -> s3://{bucket}/{key}")
 
 
+# Simply re-add the extract and process commands from their respective modules
+# to this CLI group.
 cli.add_command(extract_main, name="extract")
 cli.add_command(process_main, name="process")

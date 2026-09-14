@@ -13,7 +13,6 @@ from botocore.exceptions import ClientError
 from tqdm import tqdm
 
 DEFAULT_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-DEFAULT_REGION = "us-east-1"
 DEFAULT_MAX_JOBS = 10
 TERMINAL_JOB_STATUSES = ("Completed", "Failed", "Stopped", "PartiallyCompleted")
 INPUT_FILE_RE = re.compile(r"_input_(\d+)\.jsonl$", re.IGNORECASE)
@@ -108,12 +107,12 @@ def _wait_for_jobs(
             time.sleep(poll_interval)
 
 
-def _list_input_files(s3_prefix: str, region: str) -> list[tuple[int, str]]:
+def _list_input_files(s3_prefix: str) -> list[tuple[int, str]]:
     bucket, prefix = _parse_s3_uri(s3_prefix)
     if prefix and not prefix.endswith("/"):
         prefix += "/"
 
-    s3 = boto3.client("s3", region_name=region)
+    s3 = boto3.client("s3")
     input_files = []
     paginator = s3.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
@@ -167,7 +166,6 @@ def extract_trial_data_bedrock_batch(
     s3_output_path: str,
     role_arn: str | None = None,
     model_id: str = DEFAULT_MODEL,
-    region: str = DEFAULT_REGION,
     poll_interval: int = 60,
     wait: bool = True,
 ) -> str:
@@ -186,8 +184,6 @@ def extract_trial_data_bedrock_batch(
         ``BEDROCK_JOB_ROLE_ARN`` environment variable.
     model_id :
         Bedrock model ID. Default is Claude Haiku 4.5.
-    region :
-        AWS region. Default is ``us-east-1``.
     poll_interval :
         Seconds between job-status polls. Default is 60.
     wait :
@@ -215,7 +211,7 @@ def extract_trial_data_bedrock_batch(
             f"s3_output_path must be an S3 URI, got {s3_output_path!r}"
         )
 
-    bedrock_client = boto3.client("bedrock", region_name=region)
+    bedrock_client = boto3.client("bedrock")
     response = bedrock_client.create_model_invocation_job(
         jobName=job_name,
         roleArn=role_arn,
@@ -247,7 +243,6 @@ def extract_trial_data_bedrock_batch_many(
     s3_output_prefix: str,
     role_arn: str | None = None,
     model_id: str = DEFAULT_MODEL,
-    region: str = DEFAULT_REGION,
     poll_interval: int = 60,
     wait: bool = False,
     max_jobs: int = DEFAULT_MAX_JOBS,
@@ -272,8 +267,6 @@ def extract_trial_data_bedrock_batch_many(
         ``BEDROCK_JOB_ROLE_ARN`` environment variable.
     model_id :
         Bedrock model ID. Default is Claude Haiku 4.5.
-    region :
-        AWS region. Default is ``us-east-1``.
     poll_interval :
         Seconds between job-status polls. Default is 60.
     wait :
@@ -310,7 +303,7 @@ def extract_trial_data_bedrock_batch_many(
             f"s3_output_prefix must be an S3 URI, got {s3_output_prefix!r}"
         )
 
-    input_files = _list_input_files(s3_input_prefix, region)
+    input_files = _list_input_files(s3_input_prefix)
     if not input_files:
         raise ValueError(
             f"No *_input_{{N}}.jsonl objects found under {s3_input_prefix}"
@@ -337,7 +330,6 @@ def extract_trial_data_bedrock_batch_many(
                 s3_output_path=output_uri,
                 role_arn=role_arn,
                 model_id=model_id,
-                region=region,
                 poll_interval=poll_interval,
                 wait=False,
             )
@@ -377,7 +369,7 @@ def extract_trial_data_bedrock_batch_many(
 
     job_arns = [row[3] for row in submitted]
     if wait and job_arns:
-        bedrock_client = boto3.client("bedrock", region_name=region)
+        bedrock_client = boto3.client("bedrock")
         _wait_for_jobs(bedrock_client, job_arns, poll_interval)
     return job_arns
 
@@ -386,7 +378,6 @@ def extract_trial_data_bedrock_sync(
     s3_input_jsonl_path: str,
     output_jsonl_path: str,
     model_id: str = DEFAULT_MODEL,
-    region: str = DEFAULT_REGION,
 ) -> list[dict]:
     """Invoke Bedrock synchronously for each record in an S3 JSONL file.
 
@@ -398,8 +389,6 @@ def extract_trial_data_bedrock_sync(
         Local path to write output JSONL records.
     model_id :
         Bedrock model ID. Default is Claude Haiku 4.5.
-    region :
-        AWS region. Default is ``us-east-1``.
 
     Returns
     -------
@@ -413,8 +402,8 @@ def extract_trial_data_bedrock_sync(
             f"s3_input_jsonl_path must be an S3 URI, got {s3_input_jsonl_path!r}"
         )
 
-    s3 = boto3.client("s3", region_name=region)
-    bedrock_runtime = boto3.client("bedrock-runtime", region_name=region)
+    s3 = boto3.client("s3")
+    bedrock_runtime = boto3.client("bedrock-runtime")
 
     bucket, s3_key = _parse_s3_uri(s3_input_jsonl_path)
     obj = s3.get_object(Bucket=bucket, Key=s3_key)
@@ -474,12 +463,6 @@ def extract_trial_data_bedrock_sync(
     help="Bedrock model ID.",
 )
 @click.option(
-    "--region",
-    default=DEFAULT_REGION,
-    show_default=True,
-    help="AWS region.",
-)
-@click.option(
     "--poll-interval",
     type=int,
     default=60,
@@ -512,7 +495,6 @@ def main(
     job_name: str | None,
     role_arn: str | None,
     model_id: str,
-    region: str,
     poll_interval: int,
     wait: bool | None,
     max_jobs: int,
@@ -549,7 +531,6 @@ def main(
                 s3_output_path=output_jsonl_path,
                 role_arn=role_arn,
                 model_id=model_id,
-                region=region,
                 poll_interval=poll_interval,
                 wait=True if wait is None else wait,
             )
@@ -560,7 +541,6 @@ def main(
                 s3_output_prefix=output_jsonl_path,
                 role_arn=role_arn,
                 model_id=model_id,
-                region=region,
                 poll_interval=poll_interval,
                 wait=False if wait is None else wait,
                 max_jobs=max_jobs,
@@ -574,7 +554,6 @@ def main(
             s3_input_jsonl_path=s3_input_jsonl_path,
             output_jsonl_path=output_jsonl_path,
             model_id=model_id,
-            region=region,
         )
 
 
