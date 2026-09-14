@@ -5,16 +5,19 @@ clinical trial text.
 import re
 import csv
 import gzip
+import json
+import os
 import tqdm
 import logging
 from difflib import SequenceMatcher
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from indra.literature.pmc_client import id_lookup, get_text_s3
 from indra.literature.pubmed_client import get_abstract, get_metadata_for_all_ids
 
 from trialsynth.ctgov.config import CTConfig
-from trialsynth.base.extract.paths import CONTENT_TXT_DIR
+from trialsynth.base.extract.paths import PMID_TEXTS_CACHE
 
 
 logger = logging.getLogger(__name__)
@@ -178,7 +181,7 @@ def get_trial_pmids() -> list[str]:
     return sorted(intersection)
 
 
-def get_pmid_texts(pmids: list[str]) -> dict:
+def get_pmid_texts(pmids: list[str], max_workers: int = 8) -> dict:
     """Return title, abstract, and full text for each PMID.
 
     Tries the SQLite lite DB first when configured, then the Postgres
@@ -189,6 +192,9 @@ def get_pmid_texts(pmids: list[str]) -> dict:
     ----------
     pmids :
         PubMed IDs.
+    max_workers :
+        Maximum number of worker threads for PMC S3 full-text fetch.
+        Default: 8.
 
     Returns
     -------
@@ -336,7 +342,7 @@ def get_pmid_texts(pmids: list[str]) -> dict:
                     _note_filled(pmid)
 
             if s3_jobs:
-                with ThreadPoolExecutor(max_workers=8) as executor:
+                with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
                     futures = {
                         executor.submit(get_text_s3, pmcid): (pmid, abstract)
                         for pmid, pmcid, abstract in s3_jobs
@@ -375,151 +381,71 @@ def get_pmid_texts(pmids: list[str]) -> dict:
     return out
 
 
-def download_texts(pmids: list[str]):
-    """Download texts for PMIDs sequentially
+def download_texts_bulk(pmids: list[str], max_workers: int = 8, cache_path=None) -> dict:
+    """Fill the local PMID text cache for the given PMIDs.
 
-    Parameters
-    ----------
-    pmids :
-        List of PMIDs to download text for.
-    """
-    logger.info(f"Downloading text for {len(pmids)} PMIDs...")
-
-    for pmid in tqdm.tqdm(pmids):
-        _download_one_text(pmid)
-
-
-def _download_one_text(pmid: str) -> None:
-    # Tries PMC full text from S3 first, then falls back to the PubMed abstract.
-    # Writes ``<pmid>.txt`` to CONTENT_TXT_DIR on success.
-    if CONTENT_TXT_DIR.join(name=f"{pmid}.txt").exists():
-        return
-
-    try:
-        text = None
-
-        pmcid = id_lookup(pmid, idtype="pmid").get("pmcid")
-        if pmcid:
-            text = get_text_s3(pmcid)
-
-        if not text:
-            text = get_abstract(pmid, prepend_title=True)
-
-        if text:
-            CONTENT_TXT_DIR.join(name=f"{pmid}.txt").write_text(text, encoding="utf-8")
-        else:
-            tqdm.tqdm.write(f"{pmid} - NO CONTENT")
-
-    except Exception as e:
-        tqdm.tqdm.write(f"{pmid} - FAILED: {e}")
-
-
-def _attempt_fulltext(pmid: str, pmcid: str, abstract) -> str:
-    try:
-        text = get_text_s3(pmcid)
-        if text:
-            CONTENT_TXT_DIR.join(name=f"{pmid}.txt").write_text(
-                text, encoding="utf-8"
-            )
-            return "s3"
-    except Exception as e:
-        tqdm.tqdm.write(f"{pmid} - S3 FAILED: {e}")
-
-    if abstract:
-        CONTENT_TXT_DIR.join(name=f"{pmid}.txt").write_text(
-            abstract, encoding="utf-8"
-        )
-        return "abs"
-
-    tqdm.tqdm.write(f"{pmid} - NO CONTENT")
-    return "none"
-
-
-def download_texts_bulk(pmids: list[str], max_workers: int = 8):
-    """Download texts via a bulk PubMed metadata fetch and S3 PMC
+    Loads the gzipped JSON cache, fetches only missing PMIDs via
+    ``get_pmid_texts``, and merges records that have a title, abstract,
+    or full text. Fully empty results are not stored so later runs retry
+    them.
 
     Parameters
     ----------
     pmids :
         List of PMIDs to download text for.
     max_workers :
-        Maximum number of worker threads for download. Default: 8.
+        Maximum number of worker threads for PMC S3 full-text fetch.
+        Default: 8.
+    cache_path : pathlib.Path or str, optional
+        Cache file to read and write. Defaults to ``PMID_TEXTS_CACHE``.
+
+    Returns
+    -------
+    :
+        The full cache mapping after any merge.
     """
     logger.info(f"Bulk-downloading text for {len(pmids)} PMIDs...")
 
-    pending = [
-        pmid for pmid in pmids
-        if not CONTENT_TXT_DIR.join(name=f"{pmid}.txt").exists()
-    ]
+    cache_file = Path(cache_path) if cache_path is not None else Path(PMID_TEXTS_CACHE)
+    cache = {}
+    if cache_file.exists():
+        with gzip.open(cache_file, "rt", encoding="utf-8") as f:
+            cache = {str(pmid): rec for pmid, rec in json.load(f).items()}
+
+    pending = [str(pmid) for pmid in pmids if str(pmid) not in cache]
     skipped = len(pmids) - len(pending)
     if skipped:
-        logger.info(f"Skipping {skipped} PMIDs with existing text files")
+        logger.info(f"Skipping {skipped} PMIDs already in the text cache")
     if not pending:
-        return
+        return cache
 
-    metadata = get_metadata_for_all_ids(
-        pending, get_abstracts=True, prepend_title=True
-    ) or {}
-
-    n_abs = 0
-    n_no_content = 0
-    s3_jobs = []
-    missing = []
-    for pmid in tqdm.tqdm(pending, desc="Bulk metadata"):
-        rec = metadata.get(pmid)
-        if rec is None:
-            missing.append(pmid)
+    fetched = get_pmid_texts(pending, max_workers=max_workers)
+    n_added = 0
+    n_empty = 0
+    for pmid in pending:
+        fetched_rec = fetched.get(pmid) or {}
+        title = (fetched_rec.get("title") or "").strip()
+        abstract = (fetched_rec.get("abstract") or "").strip()
+        fulltext = (fetched_rec.get("fulltext") or "").strip()
+        if not title and not abstract and not fulltext:
+            n_empty += 1
             continue
-        abstract = rec.get("abstract") or None
-        pmcid = rec.get("pmcid")
-        if pmcid:
-            s3_jobs.append((pmid, pmcid, abstract))
-        elif abstract:
-            CONTENT_TXT_DIR.join(name=f"{pmid}.txt").write_text(
-                abstract, encoding="utf-8"
-            )
-            n_abs += 1
-        else:
-            tqdm.tqdm.write(f"{pmid} - NO CONTENT")
-            n_no_content += 1
+        rec = {"title": title}
+        if abstract:
+            rec["abstract"] = abstract
+        if fulltext:
+            rec["fulltext"] = fulltext
+        cache[pmid] = rec
+        n_added += 1
+
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = cache_file.with_name(cache_file.name + ".tmp")
+    with gzip.open(tmp_path, "wt", encoding="utf-8") as f:
+        json.dump(cache, f, separators=(",", ":"))
+    os.replace(tmp_path, cache_file)
 
     logger.info(
-        f"Bulk metadata: {n_abs} abstracts written, {len(s3_jobs)} with "
-        f"PMCID, {len(missing)} missing from response"
+        f"Bulk download complete: {n_added} cached, {n_empty} with no "
+        f"content, {skipped} already present"
     )
-
-    n_s3 = 0
-    if s3_jobs:
-        with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
-            futures = [
-                executor.submit(_attempt_fulltext, pmid, pmcid, abstract)
-                for pmid, pmcid, abstract in s3_jobs
-            ]
-            for fut in tqdm.tqdm(
-                as_completed(futures), total=len(futures), desc="S3 full text"
-            ):
-                status = fut.result()
-                if status == "s3":
-                    n_s3 += 1
-                elif status == "abs":
-                    n_abs += 1
-                else:
-                    n_no_content += 1
-
-    if missing:
-        logger.info(
-            f"Falling back to per-PMID download for {len(missing)} PMIDs"
-        )
-        with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
-            futures = [
-                executor.submit(_download_one_text, pmid) for pmid in missing
-            ]
-            for fut in tqdm.tqdm(
-                as_completed(futures), total=len(futures), desc="PMID fallback"
-            ):
-                fut.result()
-
-    logger.info(
-        f"Bulk download complete: {n_abs} abstracts, {n_s3} S3 full texts, "
-        f"{n_no_content} with no content"
-    )
+    return cache
