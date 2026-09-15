@@ -2,10 +2,6 @@
   "type": "object",
   "properties": {
     "study_info": {"type": "string"},
-    "pmid": {"type": "string"},
-    "trial_ids": {"type": "array", "items": {"type": "string"}},
-    "phase": {"type": ["string", "null"]},
-    "locations": {"type": "array", "items": {"type": "string"}},
     "arms": {
       "type": "array",
       "description": "All distinct patient groups with dedicated outcome data reported in the study, whether an interventional treatment/control arm or an observational subgroup defined by a biomarker, exposure, or other stratifying factor. A group counts as an arm only if the paper reports its own patient count and its own metrics, not if it is only mentioned as the comparison point inside another group's result.",
@@ -150,8 +146,8 @@
     }
   },
   "required": [
-    "study_info", "pmid", "trial_ids", "phase", "locations", "arms", "results",
-    "inclusion_criteria", "exclusion_criteria", "statistical_comparisons", "genetic"
+    "study_info", "arms", "results", "inclusion_criteria", "exclusion_criteria",
+    "statistical_comparisons", "genetic"
   ],
   "additionalProperties": false
 }

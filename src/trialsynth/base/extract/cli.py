@@ -10,38 +10,41 @@ from trialsynth.base.extract.build_batch_input_json_schema import (
     MAX_RECORDS_PER_FILE,
     main as build_batch_input,
 )
+from trialsynth.base.extract.corpus import (
+    CORPORA,
+    DEFAULT_CORPUS,
+    Corpus,
+    get_corpus,
+)
 from trialsynth.base.extract.extract_bedrock import (
     _is_jsonl_object_uri,
     _is_s3_uri,
     _parse_s3_uri,
     main as extract_main,
 )
-from trialsynth.base.extract.extract_util import (
-    download_texts_bulk,
-    get_trial_pmids,
-)
 from trialsynth.base.extract.process_bedrock import main as process_main
 
 
-def _resolve_pmids(
-    pmids: tuple[str, ...],
-    pmid_file: Path | None,
+def _resolve_ids(
+    ids: tuple[str, ...],
+    id_file: Path | None,
+    corpus: Corpus,
 ) -> list[str]:
-    pmid_list: list[str] = []
-    for value in pmids:
-        pmid_list.extend(part for part in value.replace(",", " ").split() if part)
+    id_list: list[str] = []
+    for value in ids:
+        id_list.extend(part for part in value.replace(",", " ").split() if part)
 
-    if pmid_list and pmid_file is not None:
-        raise click.UsageError("--pmids and --pmid-file are mutually exclusive")
-    if pmid_file is not None:
+    if id_list and id_file is not None:
+        raise click.UsageError("--ids and --id-file are mutually exclusive")
+    if id_file is not None:
         return [
             line.strip()
-            for line in pmid_file.read_text(encoding="utf-8").splitlines()
+            for line in id_file.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
-    if pmid_list:
-        return pmid_list
-    return get_trial_pmids()
+    if id_list:
+        return id_list
+    return corpus.resolve_ids()
 
 
 def _s3_upload_targets(
@@ -80,25 +83,37 @@ def cli():
 
 @cli.command("prepare")
 @click.option(
+    "--corpus",
+    "corpus_name",
+    type=click.Choice(sorted(CORPORA)),
+    default=DEFAULT_CORPUS,
+    show_default=True,
+    help="Record collection the IDs belong to.",
+)
+@click.option(
+    "--ids",
     "--pmids",
+    "ids",
     multiple=True,
-    metavar="PMID",
+    metavar="ID",
     help=(
-        "PMID(s) to include. Repeat the option or pass a comma-separated "
-        "list. Mutually exclusive with --pmid-file."
+        "Record ID(s) to include. Repeat the option or pass a comma-separated "
+        "list. Mutually exclusive with --id-file."
     ),
 )
 @click.option(
+    "--id-file",
     "--pmid-file",
+    "id_file",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
-    help="File of PMIDs, one per line. Mutually exclusive with --pmids.",
+    help="File of record IDs, one per line. Mutually exclusive with --ids.",
 )
 @click.option(
     "--limit",
     type=int,
     default=None,
-    help="Use only the first N PMIDs after the list is resolved.",
+    help="Use only the first N record IDs after the list is resolved.",
 )
 @click.option(
     "-o",
@@ -134,11 +149,12 @@ def cli():
     type=int,
     default=8,
     show_default=True,
-    help="Worker threads for PMC S3 full-text fetch.",
+    help="Worker threads for the corpus text download.",
 )
 def prepare(
-    pmids: tuple[str, ...],
-    pmid_file: Path | None,
+    corpus_name: str,
+    ids: tuple[str, ...],
+    id_file: Path | None,
     limit: int | None,
     out_dir: Path,
     prefix: str,
@@ -148,11 +164,14 @@ def prepare(
 ) -> None:
     """Download texts and write Bedrock batch input JSONL.
 
-    If neither --pmids nor --pmid-file is given, PMIDs come from
-    trial-publication edges (requires the ctgov pipeline).
+    If neither --ids nor --id-file is given, the IDs come from the corpus
+    itself. For the pubmed corpus that is the PMIDs on the trial-publication
+    edges, which requires the ctgov pipeline to have run.
     """
+    corpus = get_corpus(corpus_name)
+
     try:
-        resolved = _resolve_pmids(pmids, pmid_file)
+        resolved = _resolve_ids(ids, id_file, corpus)
     except FileNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -161,15 +180,16 @@ def prepare(
             raise click.UsageError("--limit must be >= 0")
         resolved = resolved[:limit]
     if not resolved:
-        raise click.UsageError("No PMIDs to prepare")
+        raise click.UsageError(f"No {corpus.name} record IDs to prepare")
 
-    cache = download_texts_bulk(resolved, max_workers=max_workers)
+    texts = corpus.load_texts(resolved, max_workers=max_workers)
 
     try:
         written = build_batch_input(
             resolved,
             out_dir=out_dir,
-            texts=cache,
+            corpus=corpus,
+            texts=texts,
             prefix=prefix,
             max_records=max_records,
         )

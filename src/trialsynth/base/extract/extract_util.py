@@ -9,6 +9,7 @@ import json
 import os
 import tqdm
 import logging
+from collections.abc import Sequence
 from difflib import SequenceMatcher
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -449,3 +450,43 @@ def download_texts_bulk(pmids: list[str], max_workers: int = 8, cache_path=None)
         f"content, {skipped} already present"
     )
     return cache
+
+
+def _join_title_body(record: dict) -> str:
+    """Join one cache record's title and preferred body into source text.
+
+    Full text is preferred over the abstract. The title is skipped when the
+    body already opens with it, which is how the PubMed metadata fetch returns
+    abstracts.
+    """
+    title = (record.get("title") or "").strip()
+    body = (record.get("fulltext") or record.get("abstract") or "").strip()
+    if title and body:
+        return body if body.startswith(title) else f"{title}\n\n{body}"
+    return title or body
+
+
+def load_texts(pmids: Sequence[str], max_workers: int = 8) -> dict[str, str]:
+    """Return ``{pmid: source text}``, downloading anything not yet cached.
+
+    Parameters
+    ----------
+    pmids :
+        PubMed IDs to load.
+    max_workers :
+        Maximum number of worker threads for PMC S3 full-text fetch.
+        Default: 8.
+
+    Returns
+    -------
+    :
+        Source text per PMID. PMIDs with no text are left out.
+    """
+    pmid_strs = [str(pmid) for pmid in pmids]
+    cache = download_texts_bulk(pmid_strs, max_workers=max_workers)
+    texts = {}
+    for pmid in pmid_strs:
+        text = _join_title_body(cache.get(pmid) or {})
+        if text:
+            texts[pmid] = text
+    return texts

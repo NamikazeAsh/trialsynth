@@ -393,7 +393,8 @@ def extract_trial_data_bedrock_sync(
     Returns
     -------
     :
-        List of ``{"recordId", "modelOutput"}`` result dicts.
+        List of ``{"recordId", "modelInput", "modelOutput"}`` result dicts,
+        matching the record shape Bedrock batch writes.
     """
     if not output_jsonl_path:
         raise ValueError("output_jsonl_path is required")
@@ -427,7 +428,11 @@ def extract_trial_data_bedrock_sync(
             )
             model_output = json.loads(response["body"].read())
 
-            result = {"recordId": record_id, "modelOutput": model_output}
+            result = {
+                "recordId": record_id,
+                "modelInput": model_input,
+                "modelOutput": model_output,
+            }
             results.append(result)
             out_f.write(json.dumps(result) + "\n")
             out_f.flush()

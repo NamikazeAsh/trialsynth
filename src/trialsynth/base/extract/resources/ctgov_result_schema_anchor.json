@@ -1,0 +1,103 @@
+{
+  "type": "object",
+  "properties": {
+    "study_info": {
+      "type": "string",
+      "description": "One-line summary of what the trial studies, from the titles and summary."
+    },
+    "inclusion_criteria": {
+      "type": "array",
+      "description": "One entry per distinct requirement a participant must meet to enrol, split out of the registry's free-text criteria blob. Split compound criteria into separate entries when they state independent requirements.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "The requirement as a short standalone clause, e.g. 'Age 18 years or older'."
+          },
+          "evidence_anchor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "evidence_anchor"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "exclusion_criteria": {
+      "type": "array",
+      "description": "One entry per distinct condition that disqualifies a participant, split out of the registry's free-text criteria blob.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "The disqualifying condition as a short standalone clause."
+          },
+          "evidence_anchor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "evidence_anchor"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "genetic": {
+      "type": "object",
+      "description": "Gene/protein biomarkers explicitly named in the registry record.",
+      "properties": {
+        "markers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string",
+                "description": "HGNC symbol for the gene/protein explicitly named in the anchored sentence. Normalize registry aliases (e.g. p16→CDKN2A, HER2→ERBB2)."
+              },
+              "evidence_anchor": {
+                "type": "string",
+                "description": "Verbatim phrase naming this same biomarker (symbol, protein, or alias)."
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "inclusion",
+                  "exclusion",
+                  "other"
+                ],
+                "description": "inclusion: required for enrollment; exclusion: disqualifies enrollment; other: biomarker named outside the entry criteria."
+              }
+            },
+            "required": [
+              "text",
+              "evidence_anchor",
+              "role"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "reasoning": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "markers",
+        "reasoning"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "study_info",
+    "inclusion_criteria",
+    "exclusion_criteria",
+    "genetic"
+  ],
+  "additionalProperties": false
+}
