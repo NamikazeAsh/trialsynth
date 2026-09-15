@@ -11,7 +11,9 @@ from ..base.fetch import Fetcher
 from ..base.models import (
     Condition,
     DesignInfo,
+    Eligibility,
     Intervention,
+    Location,
     Outcome,
     SecondaryId,
     Trial,
@@ -200,6 +202,43 @@ class CTFetcher(Fetcher):
             why_stopped = rest_trial.protocol_section.status_module.why_stopped
             if why_stopped:
                 trial.why_stopped = why_stopped.strip().lower()
+
+            # Enrollment, either the planned target or the number actually run
+            enrollment_info = rest_trial.protocol_section.design_module.enrollment_info
+            trial.enrollment = enrollment_info.count
+            if enrollment_info.enrollment_type:
+                trial.enrollment_type = enrollment_info.enrollment_type.strip().lower()
+
+            # Whether the record carries a results section
+            trial.has_results = rest_trial.has_results
+
+            # Who the trial will and will not enrol. The criteria are a single
+            # free-text blob, not separate inclusion/exclusion fields.
+            eligibility = rest_trial.protocol_section.eligibility_module
+            trial.eligibility = Eligibility(
+                criteria=eligibility.eligibility_criteria,
+                sex=eligibility.sex.strip().lower() if eligibility.sex else None,
+                minimum_age=eligibility.minimum_age,
+                maximum_age=eligibility.maximum_age,
+                std_ages=[age.strip().lower() for age in eligibility.std_ages],
+                healthy_volunteers=eligibility.healthy_volunteers,
+            )
+
+            # Sites the trial is or was run at
+            trial.locations = [
+                Location(
+                    facility=location.facility,
+                    city=location.city,
+                    state=location.state,
+                    zip_code=location.zip_code,
+                    country=location.country,
+                    latitude=location.geo_point.lat,
+                    longitude=location.geo_point.lon,
+                )
+                for location in (
+                    rest_trial.protocol_section.contacts_locations_module.locations
+                )
+            ]
 
             # Design information
             design_info = rest_trial.protocol_section.design_module.design_info

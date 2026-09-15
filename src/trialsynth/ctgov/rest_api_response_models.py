@@ -76,11 +76,21 @@ class DesignInfo(BaseModel):
     observation_assignment: str = Field(alias="observationalModel", default=None)
 
 
+class EnrollmentInfo(BaseModel):
+
+    count: int = Field(default=None)
+    # ESTIMATED for the enrollment target, ACTUAL once the trial has run
+    enrollment_type: str = Field(alias="type", default=None)
+
+
 class DesignModule(BaseModel):
 
     study_type: str = Field(alias="studyType", default=None)
     design_info: DesignInfo = Field(alias="designInfo", default=DesignInfo())
     phases: list[str] = Field(alias="phases", default=[])
+    enrollment_info: EnrollmentInfo = Field(
+        alias="enrollmentInfo", default=EnrollmentInfo()
+    )
 
 
 class Reference(BaseModel):
@@ -134,6 +144,43 @@ class OutcomesModule(BaseModel):
     secondary_outcome: list[Outcome] = Field(alias="secondaryOutcomes", default=[])
 
 
+class EligibilityModule(BaseModel):
+    # See: https://clinicaltrials.gov/policy/protocol-definitions#EligibilityCriteria
+
+    eligibility_criteria: str = Field(
+        alias="eligibilityCriteria",
+        default=None,
+        description="Free text listing inclusion and exclusion criteria under "
+                    "their own headings. Not a structured field."
+    )
+    healthy_volunteers: bool = Field(alias="healthyVolunteers", default=None)
+    sex: str = Field(default=None)
+    minimum_age: str = Field(alias="minimumAge", default=None)
+    maximum_age: str = Field(alias="maximumAge", default=None)
+    std_ages: list[str] = Field(alias="stdAges", default=[])
+
+
+class GeoPoint(BaseModel):
+
+    lat: float = Field(default=None)
+    lon: float = Field(default=None)
+
+
+class Location(BaseModel):
+
+    facility: str = Field(default=None)
+    city: str = Field(default=None)
+    state: str = Field(default=None)
+    zip_code: str = Field(alias="zip", default=None)
+    country: str = Field(default=None)
+    geo_point: GeoPoint = Field(alias="geoPoint", default=GeoPoint())
+
+
+class ContactsLocationsModule(BaseModel):
+
+    locations: list[Location] = Field(default=[])
+
+
 class DescriptionModule(BaseModel):
 
     brief_summary: str = Field(alias="briefSummary", default=None)
@@ -155,6 +202,12 @@ class ProtocolSection(BaseModel):
     )
     outcomes_module: OutcomesModule = Field(
         alias="outcomesModule", default=OutcomesModule()
+    )
+    eligibility_module: EligibilityModule = Field(
+        alias="eligibilityModule", default=EligibilityModule()
+    )
+    contacts_locations_module: ContactsLocationsModule = Field(
+        alias="contactsLocationsModule", default=ContactsLocationsModule()
     )
     status_module: StatusModule = Field(
         alias="statusModule", default=StatusModule()
@@ -181,3 +234,8 @@ class UnflattenedTrial(BaseModel):
 
     protocol_section: ProtocolSection = Field(alias="protocolSection")
     derived_section: DerivedSection = Field(alias="derivedSection")
+    has_results: bool = Field(
+        alias="hasResults",
+        default=None,
+        description="Whether the record carries a resultsSection"
+    )

@@ -110,6 +110,117 @@ class Outcome:
         self.time_frame = time_frame
 
 
+class Eligibility:
+    """Who a trial will and will not enrol
+
+    ``criteria`` is the registry's free-text blob, listing inclusion and
+    exclusion criteria under their own headings rather than as separate fields.
+
+    Attributes
+    ----------
+    criteria : Optional[str]
+        Free-text inclusion and exclusion criteria
+    sex : Optional[str]
+        The sex eligible for the trial, e.g. "FEMALE", "ALL"
+    minimum_age : Optional[str]
+        The minimum age, as reported, e.g. "18 Years"
+    maximum_age : Optional[str]
+        The maximum age, as reported, e.g. "85 Years"
+    std_ages : list[str]
+        Standardized age groups, e.g. ["ADULT", "OLDER_ADULT"]
+    healthy_volunteers : Optional[bool]
+        Whether the trial accepts healthy volunteers
+
+    Parameters
+    ----------
+    criteria : Optional[str]
+        Free-text inclusion and exclusion criteria
+    sex : Optional[str]
+        The sex eligible for the trial
+    minimum_age : Optional[str]
+        The minimum age, as reported
+    maximum_age : Optional[str]
+        The maximum age, as reported
+    std_ages : Optional[list[str]]
+        Standardized age groups
+    healthy_volunteers : Optional[bool]
+        Whether the trial accepts healthy volunteers
+    """
+
+    def __init__(
+        self,
+        criteria: Optional[str] = None,
+        sex: Optional[str] = None,
+        minimum_age: Optional[str] = None,
+        maximum_age: Optional[str] = None,
+        std_ages: Optional[list[str]] = None,
+        healthy_volunteers: Optional[bool] = None,
+    ):
+        self.criteria = criteria
+        self.sex = sex
+        self.minimum_age = minimum_age
+        self.maximum_age = maximum_age
+        self.std_ages: list[str] = std_ages or []
+        self.healthy_volunteers = healthy_volunteers
+
+
+class Location:
+    """A site where a trial is or was run
+
+    Attributes
+    ----------
+    facility : Optional[str]
+        The name of the facility
+    city : Optional[str]
+        The city the facility is in
+    state : Optional[str]
+        The state or region the facility is in
+    zip_code : Optional[str]
+        The postal code of the facility
+    country : Optional[str]
+        The country the facility is in
+    latitude : Optional[float]
+        The latitude of the facility, as geocoded by the registry
+    longitude : Optional[float]
+        The longitude of the facility, as geocoded by the registry
+
+    Parameters
+    ----------
+    facility : Optional[str]
+        The name of the facility
+    city : Optional[str]
+        The city the facility is in
+    state : Optional[str]
+        The state or region the facility is in
+    zip_code : Optional[str]
+        The postal code of the facility
+    country : Optional[str]
+        The country the facility is in
+    latitude : Optional[float]
+        The latitude of the facility
+    longitude : Optional[float]
+        The longitude of the facility
+    """
+
+    def __init__(
+        self,
+        facility: Optional[str] = None,
+        city: Optional[str] = None,
+        state: Optional[str] = None,
+        zip_code: Optional[str] = None,
+        country: Optional[str] = None,
+        latitude: Optional[float] = None,
+        longitude: Optional[float] = None,
+    ):
+        self.facility = facility
+        self.city = city
+        self.state = state
+        self.zip_code = zip_code
+        self.country = country
+        self.latitude = latitude
+        self.longitude = longitude
+
+
 # types of all nodes should be standardized to a class holding enumerations in the future.
 
 
@@ -355,6 +466,16 @@ class Trial(Node):
         The secondary outcome of the trial
     secondary_ids: Union[list[SecondaryId], list[str]]
         The secondary IDs of the trial
+    eligibility: Eligibility
+        Who the trial will and will not enrol
+    locations: list[Location]
+        The sites where the trial is or was run
+    enrollment: Optional[int]
+        The number of participants, planned or actual
+    enrollment_type: Optional[str]
+        Whether ``enrollment`` is "estimated" (planned) or "actual" (as run)
+    has_results: Optional[bool]
+        Whether the registry record carries a results section
 
     Parameters
     ----------
@@ -401,6 +522,11 @@ class Trial(Node):
         self.secondary_outcomes: list[Union[Outcome, str]] = []
         self.secondary_ids: list[SecondaryId] = []
         self.references: list[tuple[str, str]] = []
+        self.eligibility: Eligibility = Eligibility()
+        self.locations: list[Location] = []
+        self.enrollment: Optional[int] = None
+        self.enrollment_type: Optional[str] = None
+        self.has_results: Optional[bool] = None
 
     @property
     def conditions(self) -> list[Condition]:
