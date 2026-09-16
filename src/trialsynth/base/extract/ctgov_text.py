@@ -8,9 +8,13 @@ treated as having no record, and re-running the ctgov fetch widens coverage.
 
 What a registry record can support is protocol-as-planned. ``API_FIELDS`` in
 the config carries no results or outcome-measures module, only outcome measure
-*names* and time frames plus a ``HasResults`` flag, so there are no metric
-values and no adverse events to extract -- which is why the ctgov result schema
-asks for neither.
+*names*, so there are no metric values and no adverse events to extract --
+which is why the ctgov result schema asks for neither.
+
+A field is rendered only if the result schema can draw on it -- criteria
+source, or somewhere a biomarker gets named. Everything else (phase, design,
+enrollment, status, locations, the age/sex/healthy-volunteer fields) costs
+tokens and hands a hallucinated criterion a real line to anchor to.
 
 ponytail: protocol-only ceiling. To extract reported results and adverse
 events, add the results modules to ``API_FIELDS`` and the matching fields to
@@ -63,20 +67,6 @@ def resolve_nct_ids() -> list[str]:
     return sorted(trials_by_nct())
 
 
-def _phase(phases: list[str]) -> str | None:
-    # The ctgov fetcher lowercases these, so "PHASE3" arrives as "phase3".
-    parts = [
-        phase.removeprefix("phase") for phase in phases if phase and phase != "na"
-    ]
-    return "/".join(parts) or None
-
-
-def _label(entity) -> str | None:
-    # BioEntity labels are ["intervention", <registry type>] and the like.
-    kind = entity.labels[0] if entity.labels else None
-    return next((label for label in entity.labels if label != kind), None)
-
-
 def _criteria_text(criteria: str) -> str:
     """Normalize the registry's criteria blob to one criterion per line.
 
@@ -107,20 +97,6 @@ def _terminate(line: str) -> str:
     return f"{line}."
 
 
-def _outcome_lines(outcomes: list, heading: str) -> list[str]:
-    rendered = []
-    for outcome in outcomes:
-        if isinstance(outcome, Outcome):
-            measure, time_frame = outcome.measure, outcome.time_frame
-        else:
-            measure, time_frame = outcome, None
-        if not measure:
-            continue
-        suffix = f" (time frame: {time_frame})" if time_frame else ""
-        rendered.append(f"- {measure}{suffix}")
-    return [heading, *rendered] if rendered else []
-
-
 def render_trial(trial: Trial) -> str:
     """Render one registry record as the text sent to the model.
 
@@ -134,82 +110,50 @@ def render_trial(trial: Trial) -> str:
     :
         Plain-text rendering of the record's protocol fields.
     """
-    eligibility = trial.eligibility
-    design = trial.design
-    sections: list[str] = [f"ClinicalTrials.gov registry record {trial.ns_id}"]
+    # No "record NCT01234567" header line: the NCT ID is already the Bedrock
+    # recordId and already in the framing the corpus wraps this text in.
+    sections: list[str] = []
 
     def add(label: str, value) -> None:
-        # Only absent and empty values are skipped: False and 0 are facts about
-        # the record ("Accepts healthy volunteers: False") and must survive.
-        if value is None or value == "":
+        if not value:
             return
         sections.append(f"{label}: {value}")
 
     add("Brief title", trial.title)
     add("Official title", trial.official_title)
-    add("Overall status", trial.overall_status)
-    add("Why stopped", trial.why_stopped)
-    add(
-        "Study type",
-        next((label for label in trial.labels if label != "clinical_trial"), None),
-    )
-    add("Phase", _phase(trial.phases))
-    add(
-        "Design",
-        ", ".join(
-            part
-            for part in (
-                design.purpose,
-                design.allocation,
-                design.masking,
-                design.assignment,
-            )
-            if part
-        ),
-    )
-    if trial.enrollment is not None:
-        kind = f" ({trial.enrollment_type})" if trial.enrollment_type else ""
-        add("Enrollment", f"{trial.enrollment}{kind}")
     add("Conditions", ", ".join(c.text for c in trial.conditions if c.text))
 
-    interventions = [i for i in trial.interventions if i.text]
+    # The registry type ("drug", "device") goes with the other structured
+    # fields; only the name and description can name a biomarker.
+    interventions = [
+        f"- {i.text}: {i.description}" if i.description else f"- {i.text}"
+        for i in trial.interventions
+        if i.text
+    ]
     if interventions:
         sections.append("Interventions:")
-        for intervention in interventions:
-            kind = _label(intervention)
-            head = f"- {intervention.text}" + (f" ({kind})" if kind else "")
-            if intervention.description:
-                head = f"{head}: {intervention.description}"
-            sections.append(head)
+        sections.extend(interventions)
 
     add("Brief summary", trial.brief_summary)
     add("Detailed description", trial.detailed_description)
 
-    sections.extend(_outcome_lines(trial.primary_outcomes, "Primary outcome measures:"))
-    sections.extend(
-        _outcome_lines(trial.secondary_outcomes, "Secondary outcome measures:")
-    )
+    # Names only, primary and secondary in one list: no schema field takes a
+    # time frame or cares which list a measure came from.
+    measures = [
+        outcome.measure if isinstance(outcome, Outcome) else outcome
+        for outcome in (*trial.primary_outcomes, *trial.secondary_outcomes)
+    ]
+    measures = [f"- {measure}" for measure in measures if measure]
+    if measures:
+        sections.append("Outcome measures:")
+        sections.extend(measures)
 
-    ages = " to ".join(
-        part for part in (eligibility.minimum_age, eligibility.maximum_age) if part
-    )
-    add("Eligible sex", eligibility.sex)
-    add("Eligible ages", ages)
-    add("Standard age groups", ", ".join(eligibility.std_ages))
-    if eligibility.healthy_volunteers is not None:
-        add("Accepts healthy volunteers", eligibility.healthy_volunteers)
-    if eligibility.criteria:
+    # Age, sex and healthy-volunteer eligibility are deliberately not rendered
+    # from their own registry fields: the schema only wants them as criteria,
+    # and only when the criteria block itself states them.
+    if trial.eligibility.criteria:
         sections.append("Eligibility criteria:")
-        sections.append(_criteria_text(eligibility.criteria))
-
-    countries = sorted({loc.country for loc in trial.locations if loc.country})
-    if countries:
-        add(
-            "Locations",
-            f"{len(trial.locations)} site(s) in {', '.join(countries)}",
-        )
-    if trial.has_results is not None:
-        add("Registry carries a results section", trial.has_results)
+        sections.append(_criteria_text(trial.eligibility.criteria))
 
     return "\n".join(
         _terminate(line) for section in sections for line in section.splitlines()
@@ -224,33 +168,31 @@ def load_texts(nct_ids: Sequence[str], max_workers: int = 8) -> dict[str, str]:
     nct_ids :
         NCT IDs to render.
     max_workers :
-        Accepted for parity with the other corpora and ignored -- rendering
-        reads the local trial dump, so there is nothing to parallelize.
+        Ignored; rendering reads the local dump. Kept for corpus parity.
 
     Returns
     -------
     :
-        Rendered text per NCT ID. IDs missing from the trial dump are left out.
+        Rendered text per NCT ID. IDs missing from the trial dump, and records
+        with no renderable field, are left out.
     """
     trials = trials_by_nct()
     texts = {}
     missing = []
     for nct_id in tqdm(nct_ids, desc="Rendering registry records"):
         trial = trials.get(nct_id)
-        if trial is None:
+        text = render_trial(trial) if trial else ""
+        if not text:
             missing.append(nct_id)
             continue
-        texts[nct_id] = render_trial(trial)
+        texts[nct_id] = text
 
     logger.info("Rendered %d registry records", len(texts))
     if missing:
-        preview = ", ".join(missing[:10])
-        extra = "..." if len(missing) > 10 else ""
         logger.warning(
-            "%d NCT ID(s) are not in the trial dump: %s%s. Re-run the "
-            "clinicaltrials fetch to widen coverage.",
+            "%d NCT ID(s) are not in the trial dump, or render empty (%s...). "
+            "Re-run the clinicaltrials fetch to widen coverage.",
             len(missing),
-            preview,
-            extra,
+            ", ".join(missing[:10]),
         )
     return texts

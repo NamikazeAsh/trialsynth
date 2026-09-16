@@ -1,9 +1,9 @@
 You are a clinical data scientist. You are given a ClinicalTrials.gov registry record rendered
 as text. Structure the parts the registry leaves as free prose.
 
-The record's phase, conditions, interventions, design, enrollment, locations and outcome measures
-are already published as structured registry fields, so do NOT restate them. Extract only the
-eligibility criteria and the biomarkers named in the record.
+The record's conditions, interventions and outcome measures are already published as structured
+registry fields, so do NOT restate them. Extract only the eligibility criteria and the biomarkers
+named in the record.
 
 1. For EVERY extracted data point you MUST return a short verbatim anchor phrase (5 to 15 words
 maximum) copied directly from the record text that uniquely identifies the line containing the
@@ -16,9 +16,8 @@ criteria, place exclusions under an inclusion heading, and phrase exclusions as 
 3. Write each criterion as a short standalone clause that reads correctly on its own. A single
 registry line stating several independent requirements becomes several entries. Do NOT merge
 distinct requirements into one entry, and do NOT copy the heading text as a criterion.
-4. Do not invent criteria. Age, sex and healthy-volunteer eligibility appear as their own
-registry fields ('Eligible sex', 'Eligible ages', 'Accepts healthy volunteers'); include them as
-criteria ONLY when the criteria block also states them.
+4. Do not invent criteria. Every criterion must come from the 'Eligibility criteria' block; age,
+sex and healthy-volunteer requirements count only when that block states them.
 5. Extract ONLY biomarkers explicitly named in the record into genetic.markers. MUST use official
 HGNC gene symbols and HGVS nomenclature. Always use the official HGNC gene symbol in the text
 field (e.g. ERBB2 not HER2, MYC not cMYC, ABL1 not ABL, MS4A1 not CD20) so downstream grounding
