@@ -46,6 +46,7 @@ ct_namespaces = {
 
 CONDITION_NS = ["MESH"]
 INTERVENTION_NS = ["MESH"]
+DRUG_NAMESPACES = ["DRUGBANK", "CHEBI", "MESH"]
 
 
 def get_namespaces() -> dict:

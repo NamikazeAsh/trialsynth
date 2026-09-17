@@ -8,18 +8,31 @@ nmslib_logger.setLevel(logging.ERROR)
 warnings.simplefilter('ignore')
 
 import gilda
+import gilda.ner
+from gilda import make_grounder
 from gilda.grounder import Annotation, ScoredMatch
+from gilda.process import normalize
+from gilda.term import Term
+from indra.databases import drugbank_client as db
 from indra.databases import mesh_client
 
 from .models import BioEntity
 from .util import (
     CONDITION_NS,
+    DRUG_NAMESPACES,
     INTERVENTION_NS,
     must_override
 )
 
 logger = logging.getLogger(__name__)
 
+ANNOTATE_MIN_LEN = 4
+ANNOTATE_MIN_SCORE = 0.7
+ANNOTATE_STOPLIST = {
+    "NT", "CON", "GCA", "TAB", "CPAP", "COPE", "CHCPE", "TPF", "PF",
+    "JIA", "OR", "IV", "WT", "HR", "CI", "RR", "OS", "PFS", "CR", "PR",
+    "SD", "PD", "CT", "MRI", "PCR", "IHC", "AE", "SAE", "PS", "ECOG",
+}
 
 GrounderSignature = Callable[
     [str, Optional[str], Optional[list[str]], Optional[list[str]]],
@@ -266,3 +279,61 @@ class InterventionGrounder(Grounder):
             grounder_func=grounder_func,
             mesh_prefix=mesh_prefix
         )
+
+def build_drugbank_terms():
+    """Parse INDRA's DrugBank ID to name mappings into Gilda Terms."""
+    terms = []
+    for drugbank_id, name in db.drugbank_names.items():
+        terms.append(Term(
+            norm_text=normalize(name),
+            text=name,
+            db="DRUGBANK",
+            id=drugbank_id,
+            entry_name=name,
+            status="name",
+            source="drugbank",
+        ))
+    return terms
+
+_drugbank_grounder = None
+def get_drugbank_grounder():
+    """Build once and return a DrugBank-only grounder, without touching Gilda's global grounder."""
+    global _drugbank_grounder
+    if _drugbank_grounder is None:
+        _drugbank_grounder = make_grounder(build_drugbank_terms())
+    return _drugbank_grounder
+
+def _term_result(scored_match):
+    """Return db, id, name, and score for a scored match."""
+    top = scored_match.term
+    return {"db": top.db, "id": top.id, "entry_name": top.entry_name, "score": scored_match.score}
+
+def _first_valid_annotation(text, grounder, namespaces):
+    """Fallback: annotate text with the given grounder, return the first hit above the length, stoplist, and score filters."""
+    annotations = gilda.ner.annotate(text, grounder=grounder, namespaces=namespaces)
+    for annotation in annotations:
+        matched_text = annotation.text.strip()
+        if len(matched_text) < ANNOTATE_MIN_LEN:
+            continue
+        if matched_text.upper() in ANNOTATE_STOPLIST:
+            continue
+        if annotation.matches[0].score < ANNOTATE_MIN_SCORE:
+            continue
+        return annotation.matches[0]
+    return None
+
+def drugbank_ground(text):
+    """Ground text with DrugBank first, falling back to the default Gilda grounder."""
+    drugbank_results = get_drugbank_grounder().ground(text)
+    if drugbank_results:
+        return _term_result(drugbank_results[0])
+    drugbank_match = _first_valid_annotation(text, get_drugbank_grounder(), namespaces=["DRUGBANK"])
+    if drugbank_match:
+        return _term_result(drugbank_match)
+    fallback_results = gilda.get_grounder().ground(text, namespaces=DRUG_NAMESPACES)
+    if fallback_results:
+        return _term_result(fallback_results[0])
+    fallback_match = _first_valid_annotation(text, gilda.get_grounder(), namespaces=DRUG_NAMESPACES)
+    if fallback_match:
+        return _term_result(fallback_match)
+    return None
