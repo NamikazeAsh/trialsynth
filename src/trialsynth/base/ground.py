@@ -280,6 +280,7 @@ class InterventionGrounder(Grounder):
             mesh_prefix=mesh_prefix
         )
 
+
 def build_drugbank_terms():
     """Parse INDRA's DrugBank ID to name mappings into Gilda Terms."""
     terms = []
@@ -295,7 +296,10 @@ def build_drugbank_terms():
         ))
     return terms
 
+
 _drugbank_grounder = None
+
+
 def get_drugbank_grounder():
     """Build once and return a DrugBank-only grounder, without touching Gilda's global grounder."""
     global _drugbank_grounder
@@ -303,10 +307,12 @@ def get_drugbank_grounder():
         _drugbank_grounder = make_grounder(build_drugbank_terms())
     return _drugbank_grounder
 
+
 def _term_result(scored_match):
     """Return db, id, name, and score for a scored match."""
     top = scored_match.term
     return {"db": top.db, "id": top.id, "entry_name": top.entry_name, "score": scored_match.score}
+
 
 def _first_valid_annotation(text, grounder, namespaces):
     """Fallback: annotate text with the given grounder, return the first hit above the length, stoplist, and score filters."""
@@ -322,12 +328,15 @@ def _first_valid_annotation(text, grounder, namespaces):
         return annotation.matches[0]
     return None
 
+
 def drugbank_ground(text):
     """Ground text with DrugBank first, falling back to the default Gilda grounder."""
     drugbank_results = get_drugbank_grounder().ground(text)
     if drugbank_results:
         return _term_result(drugbank_results[0])
-    drugbank_match = _first_valid_annotation(text, get_drugbank_grounder(), namespaces=["DRUGBANK"])
+    # namespaces=None here: get_drugbank_grounder() only ever holds DRUGBANK terms, so
+    # there is nothing else to restrict against.
+    drugbank_match = _first_valid_annotation(text, get_drugbank_grounder(), namespaces=None)
     if drugbank_match:
         return _term_result(drugbank_match)
     fallback_results = gilda.get_grounder().ground(text, namespaces=DRUG_NAMESPACES)
