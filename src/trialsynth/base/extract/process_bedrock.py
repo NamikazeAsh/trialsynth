@@ -35,6 +35,29 @@ def _jsonl_paths(path: Path) -> list[Path]:
     raise FileNotFoundError(path)
 
 
+class RecordFailure(Exception):
+    """A Bedrock record failed, classified by its stop_reason."""
+
+    def __init__(self, record_id: str, stop_reason: str | None, message: str):
+        super().__init__(message)
+        self.record_id = record_id
+        self.stop_reason = stop_reason
+
+
+def _source_text(rec: dict, corpus: Corpus) -> str:
+    """Recover source text from a record's echoed ``modelInput``."""
+    messages = (rec.get("modelInput") or {}).get("messages") or []
+    if not messages or not isinstance(messages[0], dict):
+        raise ValueError("missing modelInput.messages")
+    user_content = messages[0].get("content")
+    if not isinstance(user_content, str) or not user_content:
+        raise ValueError("modelInput.messages[0].content is empty")
+    source_text = corpus.unframe(user_content)
+    if not source_text:
+        raise ValueError("empty source text after un-framing the model input")
+    return source_text
+
+
 def _parse_record(line: str, corpus: Corpus) -> tuple[str, dict, str]:
     """Parse one Bedrock JSONL record.
 
@@ -60,6 +83,13 @@ def _parse_record(line: str, corpus: Corpus) -> tuple[str, dict, str]:
     model_output = rec.get("modelOutput")
     if not model_output:
         raise ValueError("missing modelOutput")
+
+    stop_reason = model_output.get("stop_reason")
+    if stop_reason not in (None, "end_turn"):
+        raise RecordFailure(
+            record_id, stop_reason, f"stop_reason={stop_reason}"
+        )
+
     content = model_output.get("content") or []
     if not content or not isinstance(content[0], dict):
         raise ValueError("modelOutput.content is empty or malformed")
@@ -70,16 +100,7 @@ def _parse_record(line: str, corpus: Corpus) -> tuple[str, dict, str]:
     if not isinstance(extraction, dict):
         raise ValueError("extraction JSON is not an object")
 
-    messages = (rec.get("modelInput") or {}).get("messages") or []
-    if not messages or not isinstance(messages[0], dict):
-        raise ValueError("missing modelInput.messages")
-    user_content = messages[0].get("content")
-    if not isinstance(user_content, str) or not user_content:
-        raise ValueError("modelInput.messages[0].content is empty")
-    source_text = corpus.unframe(user_content)
-    if not source_text:
-        raise ValueError("empty source text after un-framing the model input")
-    return record_id, extraction, source_text
+    return record_id, extraction, _source_text(rec, corpus)
 
 
 def _process_record(
@@ -183,6 +204,15 @@ def _iter_lines(jsonl_paths: list[Path]):
     show_default=True,
     help="Minimum adverse-event name length for grounding.",
 )
+@click.option(
+    "--failures-out",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Write a <record_id>\\t<stop_reason> line for each classified "
+        "failure here, for 'retry' to pick up."
+    ),
+)
 def main(
     input_path: Path,
     corpus_name: str,
@@ -190,6 +220,7 @@ def main(
     overwrite: bool,
     limit: int | None,
     ae_min_len: int,
+    failures_out: Path | None,
 ) -> None:
     """Ground Bedrock JSONL extraction output.
 
@@ -204,6 +235,7 @@ def main(
         output_dir = corpus.results_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     n_ok = n_skip = n_fail = 0
+    classified_failures: list[tuple[str, str]] = []
 
     for jsonl_path, line_no, line in tqdm(
         _iter_lines(jsonl_paths),
@@ -216,6 +248,13 @@ def main(
         loc = f"{jsonl_path.name}:{line_no}"
         try:
             record_id, extraction, source_text = _parse_record(line, corpus)
+        except RecordFailure as exc:
+            n_fail += 1
+            classified_failures.append(
+                (exc.record_id, exc.stop_reason or "unknown")
+            )
+            logger.warning("Failed to parse %s: %s", loc, exc)
+            continue
         except Exception as exc:
             n_fail += 1
             logger.warning("Failed to parse %s: %s", loc, exc)
@@ -246,6 +285,12 @@ def main(
             )
             continue
         n_ok += 1
+
+    if failures_out is not None and classified_failures:
+        failures_out.parent.mkdir(parents=True, exist_ok=True)
+        with failures_out.open("w", encoding="utf-8") as fh:
+            for record_id, stop_reason in classified_failures:
+                fh.write(f"{record_id}\t{stop_reason}\n")
 
     click.echo(
         f"Processed: {n_ok}  skipped: {n_skip}  failed: {n_fail}\n"

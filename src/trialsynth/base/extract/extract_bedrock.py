@@ -2,6 +2,7 @@
 import os
 import re
 import json
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -11,6 +12,7 @@ from urllib.parse import urlparse
 import boto3
 import click
 import requests
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from tqdm import tqdm
 
@@ -18,6 +20,8 @@ DEFAULT_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 DEFAULT_OPENAI_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_MAX_JOBS = 10
 DEFAULT_TIMEOUT_HOURS = 24
+SYNC_READ_TIMEOUT = 300
+MIN_BATCH_RECORDS = 100
 TERMINAL_JOB_STATUSES = ("Completed", "Failed", "Stopped", "PartiallyCompleted")
 INPUT_FILE_RE = re.compile(r"_input_(\d+)\.jsonl$", re.IGNORECASE)
 S3_URI_RE = re.compile(r"s3://[^/\s]+(?:/[^\s]*)?")
@@ -53,6 +57,31 @@ def _require_s3_uri(value: str, label: str) -> None:
 def _is_jsonl_object_uri(uri: str) -> bool:
     _, key = _parse_s3_uri(uri)
     return key.lower().endswith(".jsonl")
+
+
+def _count_jsonl_records(s3_uri: str) -> int:
+    """Count non-empty lines in an S3 JSONL object."""
+    bucket, key = _parse_s3_uri(s3_uri)
+    obj = boto3.client("s3").get_object(Bucket=bucket, Key=key)
+    body = obj["Body"].read().decode("utf-8")
+    return sum(1 for line in body.splitlines() if line.strip())
+
+
+def _batch_fallback_to_sync(
+    s3_input_jsonl_path: str, s3_output_path: str, model_id: str
+) -> None:
+    """Run sync mode and upload the result where a batch job would have."""
+    _, input_key = _parse_s3_uri(s3_input_jsonl_path)
+    output_bucket, output_prefix = _parse_s3_uri(s3_output_path)
+    output_key = f"{output_prefix.rstrip('/')}/{Path(input_key).stem}.jsonl.out"
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        local_output = Path(tmp_dir) / Path(output_key).name
+        extract_trial_data_bedrock_sync(
+            s3_input_jsonl_path=s3_input_jsonl_path,
+            output_jsonl_path=str(local_output),
+            model_id=model_id,
+        )
+        boto3.client("s3").upload_file(str(local_output), output_bucket, output_key)
 
 
 def _client_error_code_message(exc: ClientError) -> tuple[str, str]:
@@ -418,7 +447,9 @@ def extract_trial_data_bedrock_sync(
         )
 
     s3 = boto3.client("s3")
-    bedrock_runtime = boto3.client("bedrock-runtime")
+    bedrock_runtime = boto3.client(
+        "bedrock-runtime", config=Config(read_timeout=SYNC_READ_TIMEOUT)
+    )
 
     bucket, s3_key = _parse_s3_uri(s3_input_jsonl_path)
     obj = s3.get_object(Bucket=bucket, Key=s3_key)
@@ -721,16 +752,24 @@ def main(
                 "or set the BEDROCK_JOB_ROLE_ARN environment variable."
             )
         if _is_jsonl_object_uri(s3_input_jsonl_path):
-            extract_trial_data_bedrock_batch(
-                job_name=job_name,
-                s3_input_jsonl_path=s3_input_jsonl_path,
-                s3_output_path=output_jsonl_path,
-                role_arn=role_arn,
-                model_id=model_id,
-                poll_interval=poll_interval,
-                wait=True if wait is None else wait,
-                timeout_hours=timeout_hours,
-            )
+            if _count_jsonl_records(s3_input_jsonl_path) < MIN_BATCH_RECORDS:
+                click.echo(
+                    f"Input has fewer than {MIN_BATCH_RECORDS} records, "
+                    "Bedrock batch jobs require at least that many. "
+                    "Using sync mode instead."
+                )
+                _batch_fallback_to_sync(s3_input_jsonl_path, output_jsonl_path, model_id)
+            else:
+                extract_trial_data_bedrock_batch(
+                    job_name=job_name,
+                    s3_input_jsonl_path=s3_input_jsonl_path,
+                    s3_output_path=output_jsonl_path,
+                    role_arn=role_arn,
+                    model_id=model_id,
+                    poll_interval=poll_interval,
+                    wait=True if wait is None else wait,
+                    timeout_hours=timeout_hours,
+                )
         else:
             extract_trial_data_bedrock_batch_many(
                 job_name_prefix=job_name,

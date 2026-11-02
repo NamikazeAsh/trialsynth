@@ -23,6 +23,7 @@ from trialsynth.base.extract.extract_bedrock import (
     main as extract_main,
 )
 from trialsynth.base.extract.process_bedrock import main as process_main
+from trialsynth.base.extract.retry_bedrock import cli as retry_main
 
 
 def _resolve_ids(
@@ -222,3 +223,4 @@ def prepare(
 # to this CLI group.
 cli.add_command(extract_main, name="extract")
 cli.add_command(process_main, name="process")
+cli.add_command(retry_main, name="retry")

@@ -15,6 +15,7 @@ def build_batch_input_jsonl(
     corpus: Corpus,
     prefix: str = DEFAULT_PREFIX,
     max_records: int = MAX_RECORDS_PER_FILE,
+    max_tokens: int = MAX_TOKENS,
 ) -> list[Path]:
     """Write Bedrock batch input JSONL for a corpus.
 
@@ -40,6 +41,8 @@ def build_batch_input_jsonl(
     max_records :
         Maximum number of records per output file. If more records are
         provided, the output is split. Default is 10000.
+    max_tokens :
+        ``max_tokens`` to set on each model input. Default is 16000.
 
     Returns
     -------
@@ -63,7 +66,7 @@ def build_batch_input_jsonl(
             for record_id, text in records[start:end]:
                 model_input = {
                     "anthropic_version": ANTHROPIC_VERSION,
-                    "max_tokens": MAX_TOKENS,
+                    "max_tokens": max_tokens,
                     "system": corpus.prompt,
                     "messages": [
                         {"role": "user", "content": corpus.frame(record_id, text)}
@@ -88,6 +91,7 @@ def main(
     texts: dict[str, str],
     prefix: str = DEFAULT_PREFIX,
     max_records: int = MAX_RECORDS_PER_FILE,
+    max_tokens: int = MAX_TOKENS,
 ) -> list[Path]:
     """Build batch input JSONL from record IDs.
 
@@ -108,6 +112,8 @@ def main(
         Filename prefix. Default is ``run``.
     max_records :
         Maximum number of records per output file. Default is 10000.
+    max_tokens :
+        ``max_tokens`` to set on each model input. Default is 16000.
 
     Returns
     -------
@@ -143,4 +149,5 @@ def main(
         corpus=corpus,
         prefix=prefix,
         max_records=max_records,
+        max_tokens=max_tokens,
     )
